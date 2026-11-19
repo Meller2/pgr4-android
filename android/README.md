@@ -4,7 +4,7 @@ This branch targets the base Xbox 360 disc supported by upstream PGR4-Recomp v1.
 
 ## Game build
 
-Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The host code generator runs on the build computer. On Windows, the [ReXGlue host workflow](../.github/workflows/rexglue-host.yml) builds it from a pinned source revision and checks its CLI before creating an artifact. The Android runtime uses the Android-enabled SDK source maintained by FH2 Recompiled at commit `ff062497da83f0c9ca8f9da924e90feab55ac416`. Populate its third-party source checkout, then apply the [XMP capture patch](patches/0001-xmp-capture-output.patch) from the FH2 repository root with `git apply /absolute/path/to/0001-xmp-capture-output.patch`. This lets the game receive the existing failure status for an unsupported capture request instead of aborting the debug runtime.
+Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The host code generator runs on the build computer. On Windows, the [ReXGlue host workflow](../.github/workflows/rexglue-host.yml) builds it from a pinned source revision and checks its CLI before creating an artifact. The Android runtime uses the Android-enabled SDK source maintained by FH2 Recompiled at commit `ff062497da83f0c9ca8f9da924e90feab55ac416`. Populate its third-party source checkout, then apply the [XMP capture patch](patches/0001-xmp-capture-output.patch) from the FH2 repository root with `git apply /absolute/path/to/0001-xmp-capture-output.patch`. This accepts XMP capture registration while leaving title rendering disabled, matching the behavior used by the desktop PGR4 backend.
 
 1. Extract your own base Xbox 360 disc under `PGR4-Files`, next to this repository. The extracted directory should contain `default.xex` at its root.
 2. From this repository, run the v0.10.0 host tool with `rexglue codegen pgr4_recompiled_manifest.toml`.
@@ -19,7 +19,7 @@ Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The h
 
    Run the commands from the repository root. A readable `game/default.xex` in app-specific external storage is also supported. Some Android builds restrict the app's access to directories created there by the ADB shell.
 
-The Android wrapper, SDL3, ReXGlue runtime and Xenos backend build into one ARM64 test APK with a stub in place of the game code. ReXGlue code generation has been verified against the base-game executable. Game startup remains an on-device validation step. The standalone probe below can run without one.
+The Android wrapper, SDL3, ReXGlue runtime and Xenos backend build into one ARM64 test APK with a stub in place of the game code. ReXGlue code generation has been verified against the base-game executable. The base game booted through the opening movie on an Adreno 750 with the system Vulkan driver. Race validation is in progress. The standalone probe below can run without one.
 
 ## Vulkan probe
 
