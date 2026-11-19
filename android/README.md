@@ -21,6 +21,12 @@ Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The h
 
 The ARM64 build runs the base game through the opening movie, profile creation, main menu and into an offline street race on an Adreno 750 with the system Vulkan driver. The touch overlay supports menu navigation, steering, throttle and brake. Some surfaces appear solid black or overexposed during a race. The standalone probe below requires only the Android toolchain and a Vulkan device.
 
+## Quick race on Android
+
+`quick-race.cmd` restarts the installed game on an unlocked Android device connected over ADB. It skips the intro and selects Arcade Mode, Palace Square Street Race, Ford Sierra Cosworth RS500, and Silver difficulty. It stops sending input as soon as the race HUD appears so you can drive or start a benchmark.
+
+On Windows, double-click `quick-race.cmd` in this directory. The launcher uses Python 3.10+, Pillow 9.1+, and `adb` on PATH. Install Pillow with `py -3 -m pip install Pillow` if needed. From the repository root, you can also run `py -3 android/tools/quick_race.py --serial DEVICE_SERIAL` to target a specific phone. Omit `--serial` if only one device is attached. The route assumes the base-disc build with the English menu, the default menu selections, and the touch controls enabled.
+
 ## Performance on OnePlus Ace 5
 
 The system Qualcomm driver and full-resolution render path produced 4.4–5.4 FPS in sampled main-menu windows with the Benchmark APK. Recording around 5,100 draws in one set of samples took about 23 ms per frame. With the SDK's GPU timestamp profiler and separate present thread, profile and menu scenes still took about 196–244 ms of GPU work, most of it drawing. The profiler showed four `SET_BIN_SELECT` commands per frame in those scenes. These are short bring-up samples with different settings and do not establish a sustained race frame rate.
