@@ -13,7 +13,8 @@ public final class GameActivity extends SDLActivity {
         return new String[] {
             "--game_data_root=" + new File(appStorage, "game").getAbsolutePath(),
             "--user_data_root=" + getFilesDir().getAbsolutePath(),
-            "--gpu_plugin=xenos"
+            "--gpu_plugin=xenos",
+            "--execute_unclipped_draw_vs_on_cpu=true"
         };
     }
 }
