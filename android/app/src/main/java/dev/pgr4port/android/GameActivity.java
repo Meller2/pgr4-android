@@ -4,10 +4,13 @@ import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.view.ViewGroup;
 import java.io.File;
 import org.libsdl.app.SDLActivity;
 
 public final class GameActivity extends SDLActivity {
+    private TouchPad touchPad;
+
     @Override
     protected void onCreate(Bundle state) {
         try {
@@ -16,6 +19,19 @@ public final class GameActivity extends SDLActivity {
             Log.w("PGR4", "Could not set the ReXGlue app folder", error);
         }
         super.onCreate(state);
+        if (!mBrokenLibraries) {
+            touchPad = new TouchPad(this);
+            addContentView(touchPad, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (touchPad != null) {
+            touchPad.reset();
+        }
+        super.onPause();
     }
 
     @Override

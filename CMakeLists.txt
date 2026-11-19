@@ -39,7 +39,8 @@ set(PGR4RECOMPILED_SOURCES
 )
 
 if(ANDROID)
-    add_library(pgr4_recompiled SHARED ${PGR4RECOMPILED_SOURCES})
+    add_library(pgr4_recompiled SHARED ${PGR4RECOMPILED_SOURCES}
+        android/app/src/main/cpp/touch_pad.cpp)
     set_target_properties(pgr4_recompiled PROPERTIES OUTPUT_NAME main)
     target_link_options(pgr4_recompiled PRIVATE
         "LINKER:-z,max-page-size=16384" "LINKER:-Bsymbolic-functions")
