@@ -22,10 +22,16 @@ if(ANDROID)
     set(REXGLUE_USE_VULKAN ON CACHE BOOL "Android Vulkan backend" FORCE)
     set(REXGLUE_ENABLE_TRACY OFF CACHE BOOL "Disable Tracy on Android" FORCE)
     set(REXGLUE_VERSION_OVERRIDE "0.10.0-dev.android" CACHE STRING "Android SDK version")
-    set(REXGLUE_RECOMP_DEBUG_INFO "none" CACHE STRING "Guest debug information")
+    if(NOT EXISTS "${REXSDK_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "Set REXSDK_DIR to the Android-capable ReXGlue source tree.")
+    endif()
+    # The v0.10.0 host emits a CMake file that tries to rerun its desktop
+    # generator. Android consumes only the already generated source list.
+    add_subdirectory("${REXSDK_DIR}" rexglue-sdk)
+    include(generated/default/sources.cmake)
+else()
+    include(generated/rexglue.cmake)
 endif()
-
-include(generated/rexglue.cmake)
 
 # Sources
 set(PGR4RECOMPILED_SOURCES
@@ -46,10 +52,21 @@ else()
 endif()
 
 if(ANDROID)
-    rexglue_setup_target(pgr4_recompiled GPU_PLUGINS xenos)
+    set(PGR4_GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated/default")
+    add_library(pgr4_recompiled_guest OBJECT ${GENERATED_SOURCES})
+    target_link_libraries(pgr4_recompiled_guest PRIVATE rex::runtime)
+    target_include_directories(pgr4_recompiled_guest PRIVATE "${PGR4_GENERATED_DIR}")
+    rexglue_apply_target_settings(pgr4_recompiled_guest)
+    target_precompile_headers(pgr4_recompiled_guest PRIVATE
+        "${PGR4_GENERATED_DIR}/pgr4_recompiled_pch.h")
+    target_compile_options(pgr4_recompiled_guest PRIVATE -g0)
+
+    target_link_libraries(pgr4_recompiled PRIVATE pgr4_recompiled_guest rex::runtime)
     target_include_directories(pgr4_recompiled PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${PGR4_GENERATED_DIR}"
         $<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:renderdoc,INTERFACE_INCLUDE_DIRECTORIES>)
+    rexglue_configure_target(pgr4_recompiled GPU_PLUGINS xenos)
 else()
     rexglue_setup_target(pgr4_recompiled)
 endif()

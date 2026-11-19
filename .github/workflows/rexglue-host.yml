@@ -1,0 +1,40 @@
+name: Build ReXGlue host tool from source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rexglue/rexglue-sdk
+          ref: c94f5ebdcb3c9d1a460ca48e04f9758448f8d518
+          submodules: recursive
+          persist-credentials: false
+      - name: Configure host build
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"
+          clang --version
+          cmake --preset win-amd64 -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DREXGLUE_ENABLE_TRACY=OFF
+      - name: Build and check the host tool
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\LLVM\bin;$env:Path"
+          cmake --build --preset win-amd64-release --target rexglue --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./out/win-amd64/Release/rexglue.exe --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rexglue-host-windows
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            out/win-amd64/Release/rexglue.exe
+            out/win-amd64/Release/*.dll
