@@ -9,7 +9,15 @@ Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The h
 1. Extract your own base Xbox 360 disc under `PGR4-Files`, next to this repository. The extracted directory should contain `default.xex` at its root.
 2. From this repository, run the v0.10.0 host tool with `rexglue codegen pgr4_recompiled_manifest.toml`.
 3. Set `PGR4_REXSDK_DIR` to the `sdk` directory of the FH2 source checkout. Run `gradlew.bat :app:assembleDebug` on Windows, or `./gradlew :app:assembleDebug` on Linux, from this `android` directory.
-4. Install `app/build/outputs/apk/debug/app-debug.apk` with ADB and open the app once. Push the extracted disc contents to `/sdcard/Android/data/dev.pgr4port.android/files/game/` and restart the app. The target uses that directory as the game root and keeps save data in internal app storage.
+4. Install `app/build/outputs/apk/debug/app-debug.apk` with ADB. With a binary-safe shell, stage the extracted disc in the debug app's own storage:
+
+   ```sh
+   adb shell run-as dev.pgr4port.android mkdir -p files/game
+   tar -C ../PGR4-Files -cf - . | adb shell -T 'run-as dev.pgr4port.android tar -xf - -C files/game'
+   adb shell am start -n dev.pgr4port.android/.GameActivity
+   ```
+
+   Run the commands from the repository root. A readable `game/default.xex` in app-specific external storage is also supported. Some Android builds restrict the app's access to directories created there by the ADB shell.
 
 The Android wrapper, SDL3, ReXGlue runtime and Xenos backend build into one ARM64 test APK with a stub in place of the game code. ReXGlue code generation has been verified against the base-game executable. Game startup remains an on-device validation step. The standalone probe below can run without one.
 
