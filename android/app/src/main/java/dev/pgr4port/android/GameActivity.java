@@ -1,9 +1,23 @@
 package dev.pgr4port.android;
 
+import android.os.Bundle;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.util.Log;
 import java.io.File;
 import org.libsdl.app.SDLActivity;
 
 public final class GameActivity extends SDLActivity {
+    @Override
+    protected void onCreate(Bundle state) {
+        try {
+            Os.setenv("REX_APP_FOLDER", getFilesDir().getAbsolutePath(), true);
+        } catch (ErrnoException error) {
+            Log.w("PGR4", "Could not set the ReXGlue app folder", error);
+        }
+        super.onCreate(state);
+    }
+
     @Override
     protected String[] getArguments() {
         File appStorage = getExternalFilesDir(null);
