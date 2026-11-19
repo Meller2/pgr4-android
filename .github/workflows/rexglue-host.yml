@@ -24,9 +24,9 @@ jobs:
           submodules: recursive
           persist-credentials: false
           path: rexglue
-      - name: Patch 20-bit vector unpacking in the generator
+      - name: Patch NORMPACKED64 vector unpacking in the generator
         shell: pwsh
-        run: git apply ../android/patches/0002-codegen-unpack-signed-20-bit.patch
+        run: git apply ../android/patches/0002-codegen-unpack-normpacked64.patch
       - name: Configure host build
         shell: pwsh
         run: |
