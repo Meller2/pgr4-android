@@ -42,12 +42,15 @@ set(PGR4RECOMPILED_SOURCES
 
 if(ANDROID)
     add_library(pgr4_recompiled SHARED ${PGR4RECOMPILED_SOURCES}
-        android/app/src/main/cpp/touch_pad.cpp)
+        android/app/src/main/cpp/touch_pad.cpp
+        android/app/src/main/cpp/tiling_trace.cpp)
     set_target_properties(pgr4_recompiled PROPERTIES OUTPUT_NAME main)
     target_link_options(pgr4_recompiled PRIVATE
         "LINKER:-z,max-page-size=16384" "LINKER:-Bsymbolic-functions")
     set_target_properties(SDL3-shared PROPERTIES
         OUTPUT_NAME SDL3 DEBUG_POSTFIX "" RELEASE_POSTFIX "" RELWITHDEBINFO_POSTFIX "")
+    set_target_properties(main_hook hook_impl file_redirect_hook gsl_alloc_hook
+        PROPERTIES DEBUG_POSTFIX "" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver-hooks")
 elseif(WIN32)
     add_executable(pgr4_recompiled WIN32 ${PGR4RECOMPILED_SOURCES})
 else()

@@ -47,6 +47,8 @@ public final class GameActivity extends SDLActivity {
         return new String[] {
             "--game_data_root=" + gameRoot.getAbsolutePath(),
             "--user_data_root=" + getFilesDir().getAbsolutePath(),
+            "--android_native_lib_dir=" + getApplicationInfo().nativeLibraryDir,
+            "--android_tmp_dir=" + getCacheDir().getAbsolutePath(),
             "--gpu_plugin=xenos",
             "--execute_unclipped_draw_vs_on_cpu=true"
         };
