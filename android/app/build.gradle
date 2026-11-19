@@ -31,7 +31,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DREXSDK_DIR=${rexSdk.path.replace('\\', '/')}", '-DANDROID_STL=c++_shared'
-                targets 'pgr4_recompiled', 'rexgpu-xenos'
+                targets 'pgr4_recompiled', 'rexgpu-xenos', 'rex_android_gpu_driver'
             }
         }
     }
