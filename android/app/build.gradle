@@ -36,6 +36,17 @@ android {
         }
     }
 
+    buildTypes {
+        benchmark {
+            initWith debug
+            externalNativeBuild {
+                cmake {
+                    arguments '-DCMAKE_BUILD_TYPE=Release'
+                }
+            }
+        }
+    }
+
     sourceSets.main.java.srcDir sdlJava
     externalNativeBuild {
         cmake {

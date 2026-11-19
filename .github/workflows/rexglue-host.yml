@@ -10,13 +10,23 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rexglue
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: rexglue/rexglue-sdk
           ref: c94f5ebdcb3c9d1a460ca48e04f9758448f8d518
           submodules: recursive
           persist-credentials: false
+          path: rexglue
+      - name: Patch 20-bit vector unpacking in the generator
+        shell: pwsh
+        run: git apply ../android/patches/0002-codegen-unpack-signed-20-bit.patch
       - name: Configure host build
         shell: pwsh
         run: |
@@ -36,5 +46,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: |
-            out/win-amd64/Release/rexglue.exe
-            out/win-amd64/Release/*.dll
+            rexglue/out/win-amd64/Release/rexglue.exe
+            rexglue/out/win-amd64/Release/*.dll
