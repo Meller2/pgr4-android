@@ -1,0 +1,17 @@
+diff --git a/sdk/src/kernel/xam/apps/xmp_app.cpp b/sdk/src/kernel/xam/apps/xmp_app.cpp
+index a5e9088..4e57320 100644
+--- a/sdk/src/kernel/xam/apps/xmp_app.cpp
++++ b/sdk/src/kernel/xam/apps/xmp_app.cpp
+@@ -461,9 +461,9 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x0007003D: {
+-      // XMPCaptureOutput - not sure how this works :/
+-      REXKRNL_DEBUG("XMPCaptureOutput(...)");
+-      assert_always("XMP output not unimplemented");
++      // The current host backend cannot capture title music output.
++      // Return the existing failure status so the title can continue.
++      REXKRNL_WARN("XMPCaptureOutput is unavailable");
+       return X_E_FAIL;
+     }
+   }
