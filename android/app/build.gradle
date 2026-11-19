@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+def sdkPath = providers.environmentVariable('PGR4_REXSDK_DIR').orNull
+if (!sdkPath) {
+    throw new GradleException('Set PGR4_REXSDK_DIR to the Android-capable ReXGlue SDK source tree.')
+}
+def rexSdk = new File(sdkPath).canonicalFile
+def sdlJava = new File(rexSdk, 'thirdparty/sdl3/android-project/app/src/main/java')
+if (!new File(sdlJava, 'org/libsdl/app/SDLActivity.java').isFile()) {
+    throw new GradleException('SDL3 sources are missing from the ReXGlue SDK tree.')
+}
+
+android {
+    namespace 'dev.pgr4port.android'
+    compileSdk 35
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'dev.pgr4port.android'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.0.1-dev'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                arguments "-DREXSDK_DIR=${rexSdk.path.replace('\\', '/')}", '-DANDROID_STL=c++_shared'
+                targets 'pgr4_recompiled', 'rexgpu-xenos'
+            }
+        }
+    }
+
+    sourceSets.main.java.srcDir sdlJava
+    externalNativeBuild {
+        cmake {
+            path file('../../CMakeLists.txt')
+            version '3.30.5'
+        }
+    }
+}
