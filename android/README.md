@@ -1,6 +1,6 @@
 # PGR4 on Android
 
-This branch targets the base Xbox 360 disc supported by upstream PGR4-Recomp v1.2.2. It uses the ReXGlue Xenos plugin with Vulkan and builds for arm64-v8a. The initial target is one offline race with a physical controller. Game binaries, disc contents and generated guest code stay local.
+This branch targets the base Xbox 360 disc supported by upstream PGR4-Recomp v1.2.2. It uses the ReXGlue Xenos plugin with Vulkan and builds for arm64-v8a. The initial target is one offline race with a physical controller. The first tested codegen input reported Title ID `4D5307F9`, Media ID `5A381A4E`, and version `0.0.0.1`. Game binaries, disc contents and generated guest code stay local.
 
 ## Game build
 
@@ -11,7 +11,7 @@ Use JDK 17+, Android SDK Platform 35, NDK 28.2.13676358, and CMake 3.30.5. The h
 3. Set `PGR4_REXSDK_DIR` to the `sdk` directory of the FH2 source checkout. Run `gradlew.bat :app:assembleDebug` on Windows, or `./gradlew :app:assembleDebug` on Linux, from this `android` directory.
 4. Install `app/build/outputs/apk/debug/app-debug.apk` with ADB and open the app once. Push the extracted disc contents to `/sdcard/Android/data/dev.pgr4port.android/files/game/` and restart the app. The target uses that directory as the game root and keeps save data in internal app storage.
 
-The Android wrapper, SDL3, ReXGlue runtime and Xenos backend build into one ARM64 test APK with a stub in place of the game code. The full game build and launch are pending a disc dump. The standalone probe below can run without one.
+The Android wrapper, SDL3, ReXGlue runtime and Xenos backend build into one ARM64 test APK with a stub in place of the game code. ReXGlue code generation has been verified against the base-game executable. Game startup remains an on-device validation step. The standalone probe below can run without one.
 
 ## Vulkan probe
 
