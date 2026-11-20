@@ -1,5 +1,6 @@
 package dev.pgr4port.android;
 
+import android.content.pm.ActivityInfo;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -10,6 +11,12 @@ import org.libsdl.app.SDLActivity;
 
 public final class GameActivity extends SDLActivity {
     private TouchPad touchPad;
+
+    @Override
+    public void setOrientationBis(int width, int height, boolean resizable, String hint) {
+        // SDL otherwise allows portrait for its resizable window, overriding the manifest.
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
 
     @Override
     protected void onCreate(Bundle state) {
