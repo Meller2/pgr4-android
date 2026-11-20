@@ -60,6 +60,10 @@ android_gpu_driver_name = "libvulkan_freedreno.so"
 
 The base-disc D3D entry points for the tested executable are `0x8269C6D0` (`BeginTiling`) and `0x8269CB68` (`EndTiling`). The former stores the tile count and the latter calls the matching resolve function. The optional `pgr4_trace_tiling = true` setting logged two full-width tiles covering rows 0–480 and 480–720. The trace records the first 24 multi-tile calls and leaves the guest rendering calls intact.
 
+For GPU diagnosis, apply the optional [Xenos bin timing patch](patches/0003-vulkan-profile-xenos-bins.patch) from the FH2 repository root and rebuild. With `gpu_cronometro = true`, the SDK logs the GPU draw time per `SET_BIN_SELECT` mask. On Ace 5 at the Palace Square starting grid with Turnip v39, native render scale and 2× MSAA, complete windows after the HUD measured 62.7–63.9 ms of GPU work per frame. Draws accounted for 54.8–55.9 ms, split between mask `0x80000003` (27.4–28.1 ms), `0xC` (14.2–14.4 ms) and `0xFFFFFFFF` (13.2–13.5 ms). The masks describe selection state and do not by themselves identify a specific draw pass. The stage profiler does not measure Android composition. A separate timestamp run at the same grid showed about 99.9% device GPU activity in KGSL samples.
+
+Removing the SDK's forced 4× anisotropic filtering (`anisotropic_override = -1`, preserving the guest's choices) gave 15.5, 15.5 and 17.0 FPS in complete windows after the HUD. Two windows overlapped the 15.5–15.7 FPS control and one was faster. Both runs started and ended at thermal status 1. This did not establish a consistent gain; the default sampler settings were restored.
+
 A local single-pass probe merged those two rectangles, capped MSAA at 1× and relaxed draw predication. The title screen showed heavy corruption. The test device was returned to Turnip with the standard two-tile layout and 2× MSAA.
 
 ## Vulkan probe
