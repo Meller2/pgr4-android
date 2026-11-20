@@ -29,6 +29,8 @@ On Windows, double-click `quick-race.cmd` in this directory. The launcher uses P
 
 ## Performance on OnePlus Ace 5
 
+The in-game monitor shows guest FPS, average frame time and Android thermal status (0–6) at the top of the screen. Tap the monitor to collapse it to a small `FPS` button. Tap again to expand it. The setting is saved and updates stop when the monitor is collapsed or the game is in the background.
+
 For a quick comparison at the start of the race, run this from the repository root with the phone unlocked:
 
 ```bat

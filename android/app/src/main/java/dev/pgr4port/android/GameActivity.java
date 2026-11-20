@@ -5,12 +5,15 @@ import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.view.Gravity;
+import android.widget.FrameLayout;
 import android.view.ViewGroup;
 import java.io.File;
 import org.libsdl.app.SDLActivity;
 
 public final class GameActivity extends SDLActivity {
     private TouchPad touchPad;
+    private PerformanceHud performanceHud;
 
     @Override
     public void setOrientationBis(int width, int height, boolean resizable, String hint) {
@@ -30,11 +33,28 @@ public final class GameActivity extends SDLActivity {
             touchPad = new TouchPad(this);
             addContentView(touchPad, new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            performanceHud = new PerformanceHud(this);
+            FrameLayout.LayoutParams hudLayout = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            hudLayout.topMargin = Math.round(8 * getResources().getDisplayMetrics().density);
+            addContentView(performanceHud, hudLayout);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (performanceHud != null) {
+            performanceHud.resume();
         }
     }
 
     @Override
     protected void onPause() {
+        if (performanceHud != null) {
+            performanceHud.pause();
+        }
         if (touchPad != null) {
             touchPad.reset();
         }
