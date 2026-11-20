@@ -42,6 +42,7 @@ set(PGR4RECOMPILED_SOURCES
 
 if(ANDROID)
     add_library(pgr4_recompiled SHARED ${PGR4RECOMPILED_SOURCES}
+        android/app/src/main/cpp/ring_wait.cpp
         android/app/src/main/cpp/touch_pad.cpp
         android/app/src/main/cpp/tiling_trace.cpp)
     set_target_properties(pgr4_recompiled PROPERTIES OUTPUT_NAME main)
