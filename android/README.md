@@ -68,6 +68,12 @@ Removing the SDK's forced 4× anisotropic filtering (`anisotropic_override = -1`
 
 A local single-pass probe merged those two rectangles, capped MSAA at 1× and relaxed draw predication. The title screen showed heavy corruption. The test device was returned to Turnip with the standard two-tile layout and 2× MSAA.
 
+Follow-up measurements on Ace 5 (Turnip v39, 1280×720) showed:
+
+- **Paired draw state.** Extending the PM4 replay probe to hash VS/PS shaders, shader constants, fetch constants and render state confirmed that 100% of paired predicated draws across `0x80000003` and `0xC` (2,995–3,440 per frame) share identical shader inputs and render state, differing only in `PA_SC_WINDOW_OFFSET` and `PA_SC_WINDOW_SCISSOR`.
+- **Hoisted shared-memory uploads.** Render-pass diagnostics showed ~1,131 mid-pass `VkRenderPass` breaks per frame (488 in tile 0, 664 in `0xFFFFFFFF`), almost all caused by `VulkanSharedMemory::UploadRanges` ending the active render pass to copy dirty guest pages. Apply [0005-vulkan-hoist-shared-memory-uploads.patch](patches/0005-vulkan-hoist-shared-memory-uploads.patch) (which hoists safe uploads ahead of `CmdVkBeginRendering` / `CmdVkBeginRenderPass` using per-page read-generation tracking, and tightens `renderArea` to drawn scissor bounds). On Ace 5 with 2× MSAA, mid-pass barrier breaks dropped from 1,131 to 74–83 per frame, GPU time dropped from 60.6–64.2 ms to 47.9–50.2 ms, and clean Palace Square FPS rose from 15.6–16.4 to 19.0–19.1 FPS (52.3–52.6 ms average, thermal 0→0) with clean image output.
+- **Scoped single-tile 1280×720 + resolve shortcut.** Enabling `pgr4_single_tile = true` (which merges only exact `(0,0,1280,480) + (0,480,1280,720)` `BeginTiling` calls without globally relaxing predication) together with `gpu_sin_msaa = true` (avoiding the 2× MSAA EDRAM color/depth overlap at base `0` vs `960`) eliminated tile 1 (`0xC`: 0 draws), reaching 27.3–28.8 FPS clean and 29.1–29.4 FPS with `gpu_atalho_resolve = true` (22.4 resolves/frame shortcutted, 0 misses). With `vsync = false` (removing the 30 FPS guest VBlank wait), stationary Palace Square reached **30.1–31.7 FPS** (31.5–33.3 ms average, worst 42.7 ms, thermal 1→1) with clean visuals.
+
 ## Vulkan probe
 
 Build with the Android NDK, CMake and Ninja. From the repository root, with those tools on PATH:
