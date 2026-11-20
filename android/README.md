@@ -29,11 +29,21 @@ On Windows, double-click `quick-race.cmd` in this directory. The launcher uses P
 
 ## Performance on OnePlus Ace 5
 
+For a quick comparison at the start of the race, run this from the repository root with the phone unlocked:
+
+```bat
+android\quick-race.cmd --benchmark out\palace-turnip-baseline
+```
+
+Use a new output directory for each run. The script waits for the race HUD, saves a screenshot, samples for 15 seconds without sending driving input, and stops the game even if the route times out. The output contains the installed build details, app config, Android thermal status, and game log with the actual Vulkan driver. Compare only complete FPS windows between `hud` and `end` in `run.txt`. For a diagnostic run, set `gpu_cronometro = true` in the app config to log GPU timestamps by type of work. Repeat with the profiler off for the FPS comparison. Use a sustained driving run to validate the 30 FPS target.
+
 The system Qualcomm driver and full-resolution render path produced 4.4–5.4 FPS in sampled main-menu windows with the Benchmark APK. Recording around 5,100 draws in one set of samples took about 23 ms per frame. With the SDK's GPU timestamp profiler and separate present thread, profile and menu scenes still took about 196–244 ms of GPU work, most of it drawing. The profiler showed four `SET_BIN_SELECT` commands per frame in those scenes. These are short bring-up samples with different settings and do not establish a sustained race frame rate.
 
 - **Render passes.** Study how PGR4 configures the Xenos tile rectangles and replays draws. Try one full-surface pass only after mapping the base-disc functions and confirming that clears, depth, resolves and queries remain correct. The FH2 hooks are built for a different executable. The pgr4-native D3D hooks target Title Update 2. [FH2's one-pass hook](https://github.com/Gabrick75/fh2-recompiled/blob/ff062497da83f0c9ca8f9da924e90feab55ac416/app/src/fh2_desempenho.cpp), [PGR4's desktop renderer](https://github.com/shaunsingh/pgr4-native)
 - **Mobile Vulkan.** NFS Most Wanted reduces tile-memory traffic by moving safe uploads ahead of render passes. FH2 saw gains from vertex reuse and removing small GPU readbacks in its native renderer. Measure those costs in PGR4 before adapting either technique. [NFS Android measurements](https://github.com/victorgbd/NFSMW-Recompiled-Mobile/blob/main/docs/android.md), [FH2 v0.3.0 measurements](https://github.com/Gabrick75/fh2-recompiled/releases/tag/v0.3.0)
 - **Driver comparison.** At full render scale and 2× MSAA, the main menu with Single Player selected ran at 7.2–7.3 FPS across three five-second windows on stock Qualcomm and 16.4–16.6 FPS across six windows on Turnip 27.0.0-R2. The introduction and profile loading were excluded. In the Palace Square street race, short samples near the start were 4.4–5.0 FPS on Qualcomm, and the early race on Turnip ran at 14.5–16.7 FPS. These race samples use the same event with different driving and camera positions. Buildings and barriers rendered with their textures on Turnip. [Turnip build tested](https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/tag/v39), [libadrenotools](https://github.com/bylaws/libadrenotools)
+
+On November 20, 2026, the stationary Palace Square benchmark on Ace 5 used the landscape fix (`e78c507`), the native libraries from the prior Benchmark APK, Turnip v39 (Mesa `2648b2059f`), full render scale and 2× MSAA. Two complete five-second windows after the HUD ran at 15.6 and 16.4 FPS (64.3 and 61.0 ms per frame, with worst intervals of 83.2 and 71.5 ms). The command processor used 40.0 and 37.2 ms of CPU time per frame. The HUD capture showed textured buildings, barriers and road. Android reported thermal status 1 before and after the run. This is a baseline for short comparisons at the starting grid.
 
 The 50% render scale and disabled MSAA combination briefly reached 7.3 FPS but severely distorted the menu. Disabling MSAA alone also failed to improve the sampled menu frame rate. The temporary settings were removed.
 

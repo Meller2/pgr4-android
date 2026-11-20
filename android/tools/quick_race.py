@@ -4,6 +4,7 @@
 import argparse
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 import re
 import subprocess
 from time import monotonic, sleep
@@ -81,7 +82,7 @@ STAGES = [
 ]
 
 
-def quick_race(serial, timeout):
+def adb_client(serial):
     command = ["adb", "-s", serial] if serial else ["adb"]
 
     def adb(*arguments):
@@ -91,6 +92,10 @@ def quick_race(serial, timeout):
             raise RuntimeError(f"ADB {arguments[0]} failed: {detail}")
         return result.stdout
 
+    return adb
+
+
+def quick_race(adb, timeout):
     def foreground():
         focus = adb("shell", "dumpsys", "window", "displays").splitlines()
         activity_names = (ACTIVITY.encode(), f"{PACKAGE}/{PACKAGE}.GameActivity".encode())
@@ -151,7 +156,7 @@ def quick_race(serial, timeout):
             print(f"{monotonic() - started:5.1f}s  {label}", flush=True)
             if key == "driving":
                 print(f"Done in {monotonic() - started:.1f} seconds.", flush=True)
-                return
+                return frame
             press(frame, "A")
             last_press = monotonic()
             stage += 1
@@ -171,13 +176,73 @@ def quick_race(serial, timeout):
     raise RuntimeError(f"Timed out waiting for {STAGES[stage][1]} on the device")
 
 
+def benchmark(adb, timeout, output, seconds):
+    def game_files(*arguments):
+        return adb("shell", "run-as", PACKAGE, *arguments)
+
+    def thermal_status():
+        report = adb("shell", "dumpsys", "thermalservice").decode(errors="replace")
+        status = re.search(r"^Thermal Status: (\d+)", report, re.MULTILINE)
+        return status[1] if status else "unavailable"
+
+    def device_time():
+        return adb("shell", "date", "+%Y-%m-%dT%H:%M:%S%z").decode().strip()
+
+    def log_names():
+        if b"logs" not in game_files("ls", "files").splitlines():
+            return set()
+        return set(game_files("ls", "files/logs").splitlines())
+
+    if (b"mWakefulness=Awake" not in adb("shell", "dumpsys", "power")
+            or b"mDreamingLockscreen=true" in adb("shell", "dumpsys", "window")):
+        raise RuntimeError("Wake and unlock the device before benchmarking")
+
+    prior_logs = log_names()
+    package = adb("shell", "dumpsys", "package", PACKAGE).decode(errors="replace")
+    build = re.findall(r"^\s*(versionName|versionCode|lastUpdateTime)=([^\r\n]+)",
+                       package, re.MULTILINE)
+    config_name = "pgr4_recompiled.toml"
+    config = (game_files("cat", f"files/{config_name}")
+              if config_name.encode() in game_files("ls", "files").splitlines() else b"")
+    output.mkdir(parents=True)
+    (output / "config.toml").write_bytes(config)
+    with (output / "run.txt").open("w", encoding="utf-8") as run:
+        for key, value in build:
+            print(f"{key}={value}", file=run)
+        print(f"thermal_before={thermal_status()}", file=run)
+        try:
+            frame = quick_race(adb, timeout)
+            print(f"hud={device_time()}", file=run)
+            frame.save(output / "hud.png")
+            sleep(seconds)
+            print(f"end={device_time()}", file=run)
+        finally:
+            adb("shell", "am", "force-stop", PACKAGE)
+            logs = log_names() - prior_logs
+            for name in sorted(logs):
+                if re.fullmatch(rb"pgr4_recompiled_\d+\.log", name):
+                    filename = name.decode("ascii")
+                    (output / filename).write_bytes(game_files("cat", f"files/logs/{filename}"))
+            print(f"thermal_after={thermal_status()}", file=run)
+    if not list(output.glob("pgr4_recompiled_*.log")):
+        raise RuntimeError("Benchmark finished without a new game log")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", help="ADB device serial if more than one device is attached")
     parser.add_argument("--timeout", type=float, default=120, help="maximum time in seconds")
+    parser.add_argument("--benchmark", type=Path, metavar="NEW_DIR",
+                        help="record a stationary race sample and close the game")
+    parser.add_argument("--sample-seconds", type=int, choices=range(10, 31),
+                        metavar="10-30", default=15, help="benchmark time after HUD (default: 15)")
     args = parser.parse_args()
+    adb = adb_client(args.serial)
     try:
-        quick_race(args.serial, args.timeout)
+        if args.benchmark is None:
+            quick_race(adb, args.timeout)
+        else:
+            benchmark(adb, args.timeout, args.benchmark, args.sample_seconds)
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"{error}\n")
 
