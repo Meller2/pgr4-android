@@ -1,0 +1,104 @@
+diff --git a/sdk/src/graphics/command_processor.cpp b/sdk/src/graphics/command_processor.cpp
+index 22e6b82..806e4b4 100644
+--- a/sdk/src/graphics/command_processor.cpp
++++ b/sdk/src/graphics/command_processor.cpp
+@@ -108,6 +108,9 @@ REXCVAR_DEFINE_BOOL(gpu_ignorar_predicacao, false, "GPU",
+ REXCVAR_DEFINE_INT32(gpu_sonda_faixas, 0, "GPU",
+                      "Debug: log this many SET_BIN_SELECT/SET_BIN_MASK packets (with the draws since the last "
+                      "one), starting after 1500 of them so the game is in play");
++REXCVAR_DEFINE_BOOL(pgr4_profile_bin_replay, false, "GPU",
++                    "PGR4: compare PM4 draw packets across the two race bin masks")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(gpu_estudo_ib, false, "GPU",
+                     "Debug: statistics of the indirect buffers (the game's command buffers) every 10 s");
+ REXCVAR_DEFINE_INT32(gpu_msaa_muestras, 4, "GPU",
+@@ -967,6 +970,65 @@ bool CommandProcessor::ExecutePacketType2(memory::RingBuffer* reader, uint32_t p
+   return true;
+ }
+
++namespace {
++
++// Compare addresses AND packet contents. This identifies repeated command packets, not equality
++// of the surrounding GPU state, shader outputs, or pixels covered by the two draws.
++using ReplayPacket = std::pair<uintptr_t, uint64_t>;
++thread_local uint32_t pgr4_replay_frame = 0;
++
++void ProfilePgr4BinReplay(uint32_t frame, uint64_t bin, uint32_t opcode, uint32_t packet,
++                          uint32_t count, memory::RingBuffer& reader, const RegisterFile& regs) {
++  static thread_local std::vector<ReplayPacket> draws[2][2];  // Color/depth, then bin A/B.
++  if (opcode == PM4_XE_SWAP) {
++    for (size_t mode = 0; mode < 2; ++mode) {
++      auto& a = draws[mode][0];
++      auto& b = draws[mode][1];
++      if (!a.empty() || !b.empty()) {
++        const size_t calls_a = a.size(), calls_b = b.size();
++        auto sort_unique = [](auto& packets) {
++          std::sort(packets.begin(), packets.end());
++          packets.erase(std::unique(packets.begin(), packets.end()), packets.end());
++        };
++        sort_unique(a);
++        sort_unique(b);
++        size_t common = 0;
++        auto left = a.begin(), right = b.begin();
++        while (left != a.end() && right != b.end()) {
++          if (*left < *right) {
++            ++left;
++          } else if (*right < *left) {
++            ++right;
++          } else {
++            ++common;
++            ++left;
++            ++right;
++          }
++        }
++        REXGPU_INFO("[pgr4-replay] frame {} {}: bin 80000003 {} calls/{} unique, "
++                    "bin 0000000C {} calls/{} unique, {} shared packets",
++                    frame, mode == 0 ? "color-depth" : "depth-only", calls_a, a.size(),
++                    calls_b, b.size(), common);
++        a.clear();
++        b.clear();
++      }
++    }
++    return;
++  }
++  const auto mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
++  if (mode != xenos::EdramMode::kColorDepth && mode != xenos::EdramMode::kDepthOnly) {
++    return;
++  }
++  const auto payload = reader.BeginRead(size_t(count) * sizeof(uint32_t));
++  uint64_t hash = XXH3_64bits_withSeed(payload.first, payload.first_length, packet);
++  if (payload.second_length) {
++    hash = XXH3_64bits_withSeed(payload.second, payload.second_length, hash);
++  }
++  draws[mode == xenos::EdramMode::kDepthOnly][bin == 0xC].emplace_back(reader.read_ptr(), hash);
++}
++
++}  // namespace
++
+ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t packet) {
+   // Type-3 packet.
+   uint32_t opcode = (packet >> 8) & 0x7F;
+@@ -1044,6 +1106,15 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+     }
+   }
+
++  if (opcode == PM4_XE_SWAP ||
++      ((opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) &&
++       (bin_select_ == 0x80000003 || bin_select_ == 0xC))) {
++    static const bool profile_replay = REXCVAR_GET(pgr4_profile_bin_replay);
++    if (profile_replay && (pgr4_replay_frame % 24) == 0) {
++      ProfilePgr4BinReplay(pgr4_replay_frame, bin_select_, opcode, packet, count, *reader, *register_file_);
++    }
++  }
++
+   bool result = false;
+   switch (opcode) {
+     case PM4_ME_INIT:
+@@ -1057,6 +1128,7 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+       break;
+     case PM4_XE_SWAP:
+       result = ExecutePacketType3_XE_SWAP(reader, packet, count);
++      ++pgr4_replay_frame;
+       break;
+     case PM4_INDIRECT_BUFFER:
+     case PM4_INDIRECT_BUFFER_PFD:
