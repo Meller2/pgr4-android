@@ -740,6 +740,17 @@ public final class LauncherActivity extends Activity {
                 });
 
         addToggle(gfxCard,
+                s.t("Accurate Shadow Math", "Точные тени (без FastMath/FMA)"),
+                s.t("Turns off shader FMA/fast-math to reduce shadow striping on sunny tracks.", "Отключает упрощённую математику шейдеров, чтобы убрать полосы теней на солнечных трассах."),
+                !config.psAllowFma && !config.vsFastMath, val -> {
+                    config.psAllowFma = !val;
+                    config.psSkipZeroMul = !val;
+                    config.vsFastMath = !val;
+                    config.preset = Pgr4Config.PRESET_CUSTOM;
+                    config.saveAll();
+                });
+
+        addToggle(gfxCard,
                 s.t("BDA Shared Memory", "Быстрая память GPU (BDA)"),
                 s.t("Faster vertex fetch on Vulkan 1.2+ drivers (disable if Mali crashes).", "Ускоряет геометрию на современных драйверах Vulkan."),
                 config.bdaSharedMemory, val -> {
@@ -786,9 +797,8 @@ public final class LauncherActivity extends Activity {
         LinearLayout steerRow = new LinearLayout(this);
         steerRow.setOrientation(LinearLayout.HORIZONTAL);
         String[][] steerModes = {
-            {Pgr4Config.STEER_STICK, s.t("Analog Stick", "Стик")},
-            {Pgr4Config.STEER_GYRO, s.t("Tilt / Gyro", "Гироскоп")},
-            {Pgr4Config.STEER_BUTTONS, s.t("D-Pad", "Кнопки")}
+            {Pgr4Config.STEER_STICK, s.t("Analog Stick + D-Pad", "Стик + D-Pad")},
+            {Pgr4Config.STEER_GYRO, s.t("Tilt / Gyro + D-Pad", "Гироскоп + D-Pad")}
         };
         for (int i = 0; i < steerModes.length; i++) {
             final String mode = steerModes[i][0];

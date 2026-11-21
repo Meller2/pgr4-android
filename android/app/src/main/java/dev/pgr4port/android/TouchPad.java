@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.Sensor;
@@ -18,6 +19,7 @@ import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 final class TouchPad extends FrameLayout implements SensorEventListener {
@@ -60,7 +62,15 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
                 ? sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) : null;
 
         setMotionEventSplittingEnabled(true);
+        buildTopArc();
         buildRightSideControls();
+
+        // Always keep a compact circular D-Pad on the left upper side for crisp menu navigation
+        RoundDpadView dpad = new RoundDpadView(context);
+        LayoutParams dpadLp = new LayoutParams(dp(94), dp(94), Gravity.TOP | Gravity.LEFT);
+        dpadLp.leftMargin = dp(16);
+        dpadLp.topMargin = dp(72);
+        addView(dpad, dpadLp);
 
         leftSteerHost = new FrameLayout(context);
         addView(leftSteerHost, new LayoutParams(
@@ -69,34 +79,83 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
         setOpacityPercent(config.touchOpacity);
     }
 
+    private void buildTopArc() {
+        // LB & RB tucked at upper outer corners
+        addCircleButton("LB", LB, Gravity.TOP | Gravity.LEFT, 14, 12, 44, 0x9912161E, 0x55FFFFFF, 12);
+        addCircleButton("RB", RB, Gravity.TOP | Gravity.RIGHT, 14, 12, 44, 0x9912161E, 0x55FFFFFF, 12);
+
+        // Symmetric top-center bar (under the compact FPS pill when enabled)
+        int topCenterY = config.hudEnabled ? 42 : 12;
+        LinearLayout topBar = new LinearLayout(getContext());
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView backBtn = makeBoundCircleButton("BACK", BACK, 42, 0x9912161E, 0x44FFFFFF, 10);
+        LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        bLp.rightMargin = dp(24);
+        topBar.addView(backBtn, bLp);
+
+        modeToggleBtn = makeCircleView(modeIcon(), 0x9912161E, 0x88E11D2A, 10);
+        modeToggleBtn.setOnClickListener(v -> cycleSteeringMode());
+        LinearLayout.LayoutParams mLp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        mLp.rightMargin = dp(24);
+        topBar.addView(modeToggleBtn, mLp);
+
+        TextView startBtn = makeBoundCircleButton("START", START, 42, 0x9912161E, 0x44FFFFFF, 10);
+        topBar.addView(startBtn, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        LayoutParams barLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        barLp.topMargin = dp(topCenterY);
+        addView(topBar, barLp);
+    }
+
+    private TextView makeBoundCircleButton(String text, int bit, int sizeDp,
+                                           int fillColor, int strokeColor, int spSize) {
+        TextView button = makeCircleView(text, fillColor, strokeColor, spSize);
+        button.setOnTouchListener((view, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    pressed |= bit;
+                    view.setBackground(makeCircleDrawable(strokeColor, Color.WHITE));
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_POINTER_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    pressed &= ~bit;
+                    view.setBackground(makeCircleDrawable(fillColor, strokeColor));
+                    break;
+                default:
+                    return false;
+            }
+            publish();
+            return true;
+        });
+        return button;
+    }
+
     private void buildRightSideControls() {
         int lowerRight = Gravity.BOTTOM | Gravity.RIGHT;
-        int upperRight = Gravity.TOP | Gravity.RIGHT;
 
-        // Keep Start & A positions compatible with automated benchmark touch points.
-        addPadButton("Start", START, upperRight, 14, 14, 64, 44, 0xCC1E2430, 0x44FFFFFF, 12);
-        addPadButton("Back", BACK, upperRight, 14, 64, 52, 34, 0xB8181D27, 0x33FFFFFF, 11);
-        addPadButton("RB", RB, upperRight, 72, 64, 44, 34, 0xB8181D27, 0x33FFFFFF, 11);
-        addPadButton("LB", LB, upperRight, 122, 64, 44, 34, 0xB8181D27, 0x33FFFFFF, 11);
+        // Racing pedals at the bottom-right corner with horizontal grip grooves
+        PedalView gas = new PedalView(getContext(), THROTTLE, "RT", 0x99103B24, 0xCC22C55E, 0xFF22C55E);
+        LayoutParams gasLp = new LayoutParams(dp(64), dp(136), lowerRight);
+        gasLp.rightMargin = dp(14);
+        gasLp.bottomMargin = dp(14);
+        addView(gas, gasLp);
 
-        // Quick steering mode switcher right next to LB
-        modeToggleBtn = makePillView(modeLabel(), 0xB8181D27, 0x55E11D2A, 11);
-        modeToggleBtn.setOnClickListener(v -> cycleSteeringMode());
-        LayoutParams modeLp = new LayoutParams(dp(58), dp(34), upperRight);
-        modeLp.rightMargin = dp(172);
-        modeLp.topMargin = dp(64);
-        addView(modeToggleBtn, modeLp);
+        PedalView brake = new PedalView(getContext(), BRAKE, "LT", 0x994A141C, 0xCCE11D2A, 0xFFE11D2A);
+        LayoutParams brakeLp = new LayoutParams(dp(56), dp(96), lowerRight);
+        brakeLp.rightMargin = dp(88);
+        brakeLp.bottomMargin = dp(14);
+        addView(brake, brakeLp);
 
-        // Primary face buttons (A kept at right:14, bottom:110; B at right:74, bottom:110)
-        addPadButton("A", A, lowerRight, 14, 110, 52, 50, 0xCC164A2C, 0xAA22C55E, 15);
-        addPadButton("B", B, lowerRight, 74, 110, 52, 50, 0xCC4A161D, 0xAAE11D2A, 15);
-        // Handbrake (X) & Camera (Y) above B/A
-        addPadButton("Y", Y, lowerRight, 14, 166, 52, 42, 0xB84A3B12, 0xAAF5B82E, 14);
-        addPadButton("X", X, lowerRight, 74, 166, 52, 42, 0xB8162F4A, 0xAA3B82F6, 14);
-
-        // Gas (RT) & Brake (LT) pedals neatly tucked at the bottom-right corner
-        addPadButton("RT", THROTTLE, lowerRight, 14, 16, 54, 86, 0xD019522F, 0xCC22C55E, 14);
-        addPadButton("LT", BRAKE, lowerRight, 76, 16, 54, 86, 0xD05C1922, 0xCCE11D2A, 14);
+        // Classic Xbox diamond (Y top, X left, B right, A bottom) cleanly above pedals
+        addCircleButton("Y", Y, lowerRight, 66, 260, 46, 0x9926200D, 0xCCF5B82E, 15);
+        addCircleButton("X", X, lowerRight, 114, 214, 46, 0x990F2238, 0xCC3B82F6, 15);
+        addCircleButton("B", B, lowerRight, 18, 214, 46, 0x99381118, 0xCCE11D2A, 15);
+        addCircleButton("A", A, lowerRight, 66, 168, 46, 0x990F3320, 0xCC22C55E, 15);
     }
 
     private void rebuildLeftSteering() {
@@ -106,54 +165,34 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
         gyroX = 0;
         gyroView = null;
 
-        if (Pgr4Config.STEER_STICK.equals(steeringMode)) {
+        if (Pgr4Config.STEER_GYRO.equals(steeringMode)) {
+            gyroView = new GyroIndicatorView(getContext());
+            LayoutParams gLp = new LayoutParams(dp(140), dp(46), Gravity.BOTTOM | Gravity.LEFT);
+            gLp.leftMargin = dp(16);
+            gLp.bottomMargin = dp(20);
+            leftSteerHost.addView(gyroView, gLp);
+        } else {
             AnalogStickView stick = new AnalogStickView(getContext());
-            LayoutParams lp = new LayoutParams(dp(146), dp(146), Gravity.BOTTOM | Gravity.LEFT);
-            lp.leftMargin = dp(14);
+            LayoutParams lp = new LayoutParams(dp(136), dp(136), Gravity.BOTTOM | Gravity.LEFT);
+            lp.leftMargin = dp(16);
             lp.bottomMargin = dp(16);
             leftSteerHost.addView(stick, lp);
-        } else if (Pgr4Config.STEER_GYRO.equals(steeringMode)) {
-            LinearLayoutColBuilder box = new LinearLayoutColBuilder(getContext());
-            gyroView = new GyroIndicatorView(getContext());
-            LayoutParams gLp = new LayoutParams(dp(136), dp(46), Gravity.BOTTOM | Gravity.LEFT);
-            gLp.leftMargin = dp(14);
-            gLp.bottomMargin = dp(16);
-            leftSteerHost.addView(gyroView, gLp);
-
-            // Compact D-pad Up/Down for menu navigation while in Gyro mode
-            addPadButtonTo(leftSteerHost, "↑", UP, Gravity.BOTTOM | Gravity.LEFT, 14, 122, 48, 44);
-            addPadButtonTo(leftSteerHost, "↓", DOWN, Gravity.BOTTOM | Gravity.LEFT, 14, 72, 48, 44);
-            addPadButtonTo(leftSteerHost, "←", LEFT, Gravity.BOTTOM | Gravity.LEFT, 70, 72, 40, 44);
-            addPadButtonTo(leftSteerHost, "→", RIGHT, Gravity.BOTTOM | Gravity.LEFT, 114, 72, 40, 44);
-            box.unused();
-        } else {
-            addPadButtonTo(leftSteerHost, "↑", UP, Gravity.BOTTOM | Gravity.LEFT, 68, 114, 52, 50);
-            addPadButtonTo(leftSteerHost, "←", LEFT, Gravity.BOTTOM | Gravity.LEFT, 12, 56, 52, 52);
-            addPadButtonTo(leftSteerHost, "↓", DOWN, Gravity.BOTTOM | Gravity.LEFT, 68, 56, 52, 50);
-            addPadButtonTo(leftSteerHost, "→", RIGHT, Gravity.BOTTOM | Gravity.LEFT, 124, 56, 52, 52);
         }
 
         if (modeToggleBtn != null) {
-            modeToggleBtn.setText(modeLabel());
+            modeToggleBtn.setText(modeIcon());
         }
         updateSensorRegistration();
         publish();
     }
 
-    private String modeLabel() {
-        if (Pgr4Config.STEER_GYRO.equals(steeringMode)) return "Gyro";
-        if (Pgr4Config.STEER_BUTTONS.equals(steeringMode)) return "D-Pad";
-        return "Stick";
+    private String modeIcon() {
+        return Pgr4Config.STEER_GYRO.equals(steeringMode) ? "GYRO" : "STICK";
     }
 
     private void cycleSteeringMode() {
-        if (Pgr4Config.STEER_STICK.equals(steeringMode)) {
-            steeringMode = Pgr4Config.STEER_GYRO;
-        } else if (Pgr4Config.STEER_GYRO.equals(steeringMode)) {
-            steeringMode = Pgr4Config.STEER_BUTTONS;
-        } else {
-            steeringMode = Pgr4Config.STEER_STICK;
-        }
+        steeringMode = Pgr4Config.STEER_GYRO.equals(steeringMode)
+                ? Pgr4Config.STEER_STICK : Pgr4Config.STEER_GYRO;
         config.steeringMode = steeringMode;
         config.savePrefsOnly();
         rebuildLeftSteering();
@@ -182,7 +221,8 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        if (!Pgr4Config.STEER_GYRO.equals(steeringMode) || event.sensor.getType() != Sensor.TYPE_ACCELEROMETER) {
+        if (!Pgr4Config.STEER_GYRO.equals(steeringMode)
+                || event.sensor.getType() != Sensor.TYPE_ACCELEROMETER) {
             return;
         }
         float ax = event.values[0];
@@ -194,7 +234,6 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
             Display d = wm.getDefaultDisplay();
             if (d != null) rotation = d.getRotation();
         }
-        // Horizontal tilt axis in landscape
         float tilt = (rotation == Surface.ROTATION_270) ? -ay : ay;
         if (rotation == Surface.ROTATION_0 || rotation == Surface.ROTATION_180) {
             tilt = (rotation == Surface.ROTATION_180) ? ax : -ax;
@@ -208,7 +247,6 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
             normalized = Math.max(-1.0f, Math.min(1.0f, normalized));
         }
         int target = Math.round(normalized * 32767f);
-        // Smooth low-pass filter
         gyroX = Math.round(gyroX * 0.45f + target * 0.55f);
         if (gyroView != null) {
             gyroView.setValue(gyroX / 32767.0f);
@@ -219,35 +257,34 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
-    private TextView makePillView(String text, int fillColor, int strokeColor, int spSize) {
+    private TextView makeCircleView(String text, int fillColor, int strokeColor, int spSize) {
         TextView btn = new TextView(getContext());
         btn.setText(text);
         btn.setTextColor(Color.WHITE);
         btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, spSize);
         btn.setTypeface(Typeface.DEFAULT_BOLD);
         btn.setGravity(Gravity.CENTER);
-        btn.setBackground(makeKeyDrawable(fillColor, strokeColor, 14));
+        btn.setBackground(makeCircleDrawable(fillColor, strokeColor));
         btn.setFocusable(false);
         return btn;
     }
 
-    private void addPadButton(String text, int bit, int gravity,
-                              int horizontalMargin, int verticalMargin,
-                              int widthDp, int heightDp,
-                              int fillColor, int strokeColor, int spSize) {
-        TextView button = makePillView(text, fillColor, strokeColor, spSize);
+    private void addCircleButton(String text, int bit, int gravity,
+                                 int horizontalMarginDp, int verticalMarginDp,
+                                 int sizeDp, int fillColor, int strokeColor, int spSize) {
+        TextView button = makeCircleView(text, fillColor, strokeColor, spSize);
         button.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN:
                     pressed |= bit;
-                    view.setBackground(makeKeyDrawable(0xFFE11D2A, 0xFFFFFFFF, 14));
+                    view.setBackground(makeCircleDrawable(strokeColor, Color.WHITE));
                     break;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_POINTER_UP:
                 case MotionEvent.ACTION_CANCEL:
                     pressed &= ~bit;
-                    view.setBackground(makeKeyDrawable(fillColor, strokeColor, 14));
+                    view.setBackground(makeCircleDrawable(fillColor, strokeColor));
                     break;
                 default:
                     return false;
@@ -256,53 +293,27 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
             return true;
         });
 
-        LayoutParams params = new LayoutParams(dp(widthDp), dp(heightDp), gravity);
-        if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
-            params.rightMargin = dp(horizontalMargin);
+        LayoutParams params = new LayoutParams(dp(sizeDp), dp(sizeDp), gravity);
+        if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+            params.leftMargin = dp(horizontalMarginDp);
+        } else if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+            params.rightMargin = dp(horizontalMarginDp);
         } else {
-            params.leftMargin = dp(horizontalMargin);
+            params.leftMargin = dp(horizontalMarginDp);
         }
         if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.TOP) {
-            params.topMargin = dp(verticalMargin);
+            params.topMargin = dp(verticalMarginDp);
         } else {
-            params.bottomMargin = dp(verticalMargin);
+            params.bottomMargin = dp(verticalMarginDp);
         }
         addView(button, params);
     }
 
-    private void addPadButtonTo(FrameLayout host, String text, int bit, int gravity,
-                                int leftDp, int bottomDp, int wDp, int hDp) {
-        int fill = 0xC0181D27;
-        int stroke = 0x38FFFFFF;
-        TextView button = makePillView(text, fill, stroke, 15);
-        button.setOnTouchListener((view, event) -> {
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    pressed |= bit;
-                    view.setBackground(makeKeyDrawable(0xFFE11D2A, 0xFFFFFFFF, 14));
-                    break;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL:
-                    pressed &= ~bit;
-                    view.setBackground(makeKeyDrawable(fill, stroke, 14));
-                    break;
-                default:
-                    return false;
-            }
-            publish();
-            return true;
-        });
-        LayoutParams lp = new LayoutParams(dp(wDp), dp(hDp), gravity);
-        lp.leftMargin = dp(leftDp);
-        lp.bottomMargin = dp(bottomDp);
-        host.addView(button, lp);
-    }
-
-    private GradientDrawable makeKeyDrawable(int fill, int stroke, int radiusDp) {
+    private GradientDrawable makeCircleDrawable(int fill, int stroke) {
         GradientDrawable gd = new GradientDrawable();
+        gd.setShape(GradientDrawable.OVAL);
         gd.setColor(fill);
-        gd.setCornerRadius(dp(radiusDp));
-        gd.setStroke(dp(1), stroke);
+        gd.setStroke(dp(2), stroke);
         return gd;
     }
 
@@ -323,15 +334,12 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
         int dpadX = ((pressed & RIGHT) != 0 ? 32767 : 0) - ((pressed & LEFT) != 0 ? 32767 : 0);
         int finalX;
         int finalY;
-        if (Pgr4Config.STEER_STICK.equals(steeringMode)) {
-            finalX = stickX != 0 ? stickX : dpadX;
-            finalY = stickY;
-        } else if (Pgr4Config.STEER_GYRO.equals(steeringMode)) {
+        if (Pgr4Config.STEER_GYRO.equals(steeringMode)) {
             finalX = dpadX != 0 ? dpadX : gyroX;
             finalY = 0;
         } else {
-            finalX = dpadX;
-            finalY = 0;
+            finalX = stickX != 0 ? stickX : dpadX;
+            finalY = stickY;
         }
         nativeSetState(pressed & 0xffff, finalX, finalY,
                 (pressed & BRAKE) == 0 ? 0 : 255,
@@ -342,9 +350,166 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private static final class LinearLayoutColBuilder {
-        LinearLayoutColBuilder(Context c) {}
-        void unused() {}
+    private final class PedalView extends View {
+        private final int bit;
+        private final String label;
+        private final int baseFill;
+        private final int border;
+        private final int activeFill;
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint groovePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private boolean down;
+
+        PedalView(Context context, int bit, String label, int baseFill, int border, int activeFill) {
+            super(context);
+            this.bit = bit;
+            this.label = label;
+            this.baseFill = baseFill;
+            this.border = border;
+            this.activeFill = activeFill;
+
+            borderPaint.setStyle(Paint.Style.STROKE);
+            borderPaint.setStrokeWidth(dp(2));
+            borderPaint.setColor(border);
+
+            groovePaint.setStyle(Paint.Style.STROKE);
+            groovePaint.setStrokeWidth(dp(2));
+            groovePaint.setStrokeCap(Paint.Cap.ROUND);
+            groovePaint.setColor(0x88FFFFFF);
+
+            textPaint.setColor(0xCCFFFFFF);
+            textPaint.setTextSize(dp(11));
+            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+            textPaint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float w = getWidth();
+            float h = getHeight();
+            float r = dp(12);
+            fillPaint.setColor(down ? activeFill : baseFill);
+            canvas.drawRoundRect(dp(1), dp(1), w - dp(1), h - dp(1), r, r, fillPaint);
+            canvas.drawRoundRect(dp(1), dp(1), w - dp(1), h - dp(1), r, r, borderPaint);
+
+            // Racing pedal grip ribs
+            float gx1 = w * 0.25f;
+            float gx2 = w * 0.75f;
+            int ribs = h > dp(110) ? 5 : 3;
+            float startY = h * 0.34f;
+            float stepY = dp(12);
+            for (int i = 0; i < ribs; i++) {
+                float y = startY + i * stepY;
+                canvas.drawLine(gx1, y, gx2, y, groovePaint);
+            }
+            canvas.drawText(label, w * 0.5f, h * 0.20f, textPaint);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    down = true;
+                    pressed |= bit;
+                    invalidate();
+                    publish();
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_POINTER_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    down = false;
+                    pressed &= ~bit;
+                    invalidate();
+                    publish();
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    private final class RoundDpadView extends View {
+        private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint activeArrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int activeDir = 0;
+
+        RoundDpadView(Context context) {
+            super(context);
+            bgPaint.setColor(0x8812161E);
+            ringPaint.setStyle(Paint.Style.STROKE);
+            ringPaint.setStrokeWidth(dp(2));
+            ringPaint.setColor(0x55FFFFFF);
+            arrowPaint.setColor(0xBBFFFFFF);
+            activeArrowPaint.setColor(0xFFE11D2A);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float cx = getWidth() * 0.5f;
+            float cy = getHeight() * 0.5f;
+            float r = Math.min(cx, cy) - dp(2);
+            canvas.drawCircle(cx, cy, r, bgPaint);
+            canvas.drawCircle(cx, cy, r, ringPaint);
+
+            float d = r * 0.62f;
+            float s = dp(6);
+            drawTri(canvas, cx, cy - d, 0, s, (activeDir & UP) != 0);
+            drawTri(canvas, cx + d, cy, 90, s, (activeDir & RIGHT) != 0);
+            drawTri(canvas, cx, cy + d, 180, s, (activeDir & DOWN) != 0);
+            drawTri(canvas, cx - d, cy, 270, s, (activeDir & LEFT) != 0);
+        }
+
+        private void drawTri(Canvas c, float x, float y, float deg, float s, boolean active) {
+            c.save();
+            c.translate(x, y);
+            c.rotate(deg);
+            Path p = new Path();
+            p.moveTo(0, -s);
+            p.lineTo(s * 0.85f, s * 0.65f);
+            p.lineTo(-s * 0.85f, s * 0.65f);
+            p.close();
+            c.drawPath(p, active ? activeArrowPaint : arrowPaint);
+            c.restore();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            float cx = getWidth() * 0.5f;
+            float cy = getHeight() * 0.5f;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_MOVE:
+                    float dx = event.getX() - cx;
+                    float dy = event.getY() - cy;
+                    int dir = 0;
+                    if (Math.hypot(dx, dy) > dp(8)) {
+                        if (Math.abs(dx) > Math.abs(dy)) {
+                            dir = dx > 0 ? RIGHT : LEFT;
+                        } else {
+                            dir = dy > 0 ? DOWN : UP;
+                        }
+                    }
+                    pressed = (pressed & ~(UP | DOWN | LEFT | RIGHT)) | dir;
+                    activeDir = dir;
+                    invalidate();
+                    publish();
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    pressed &= ~(UP | DOWN | LEFT | RIGHT);
+                    activeDir = 0;
+                    invalidate();
+                    publish();
+                    return true;
+                default:
+                    return false;
+            }
+        }
     }
 
     private final class AnalogStickView extends View {
@@ -398,13 +563,12 @@ final class TouchPad extends FrameLayout implements SensorEventListener {
                 case MotionEvent.ACTION_MOVE:
                     active = true;
                     float dx = (event.getX() - cx) / maxTravel;
-                    float dy = (cy - event.getY()) / maxTravel; // up is positive in XInput
+                    float dy = (cy - event.getY()) / maxTravel;
                     float mag = (float) Math.hypot(dx, dy);
                     if (mag > 1.0f) {
                         dx /= mag;
                         dy /= mag;
                     }
-                    // Tiny deadzone in the very center
                     if (Math.abs(dx) < 0.08f) dx = 0f;
                     if (Math.abs(dy) < 0.08f) dy = 0f;
                     normX = dx;

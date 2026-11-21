@@ -44,6 +44,9 @@ final class Pgr4Config {
     boolean vsync = false;
     boolean asyncSkipIncomplete = false;
     boolean bdaSharedMemory = true;
+    boolean psAllowFma = true;
+    boolean psSkipZeroMul = true;
+    boolean vsFastMath = true;
     int renderScale = 100;
 
     // Launcher & overlay settings
@@ -132,6 +135,9 @@ final class Pgr4Config {
             vsync = false;
             asyncSkipIncomplete = false;
             renderScale = 100;
+            psAllowFma = true;
+            psSkipZeroMul = true;
+            vsFastMath = true;
             bdaSharedMemory = (gpuInfo == null || !gpuInfo.ok || gpuInfo.bdaSupported);
         } else if (PRESET_COMPATIBLE.equals(newPreset)) {
             singleTile = true;
@@ -140,14 +146,20 @@ final class Pgr4Config {
             vsync = false;
             asyncSkipIncomplete = false;
             renderScale = 100;
+            psAllowFma = false;
+            psSkipZeroMul = false;
+            vsFastMath = false;
             bdaSharedMemory = (gpuInfo != null && gpuInfo.ok && gpuInfo.bdaSupported);
         } else if (PRESET_QUALITY.equals(newPreset)) {
             singleTile = false;
             sinMsaa = false;
-            atalhoResolve = true;
+            atalhoResolve = false;
             vsync = false;
             asyncSkipIncomplete = false;
             renderScale = 100;
+            psAllowFma = false;
+            psSkipZeroMul = false;
+            vsFastMath = false;
             bdaSharedMemory = (gpuInfo == null || !gpuInfo.ok || gpuInfo.bdaSupported);
         }
     }
@@ -230,6 +242,15 @@ final class Pgr4Config {
         if (values.containsKey("vulkan_bda_shared_memory")) {
             bdaSharedMemory = parseBool(values.get("vulkan_bda_shared_memory"), bdaSharedMemory);
         }
+        if (values.containsKey("vulkan_ps_allow_fma")) {
+            psAllowFma = parseBool(values.get("vulkan_ps_allow_fma"), psAllowFma);
+        }
+        if (values.containsKey("vulkan_ps_skip_zero_mul")) {
+            psSkipZeroMul = parseBool(values.get("vulkan_ps_skip_zero_mul"), psSkipZeroMul);
+        }
+        if (values.containsKey("vulkan_vs_fast_math")) {
+            vsFastMath = parseBool(values.get("vulkan_vs_fast_math"), vsFastMath);
+        }
         if (values.containsKey("gpu_escala_render")) {
             renderScale = parseInt(values.get("gpu_escala_render"), renderScale);
         }
@@ -273,6 +294,9 @@ final class Pgr4Config {
         sb.append("vsync = ").append(vsync).append('\n');
         sb.append("vulkan_async_skip_incomplete_frames = ").append(asyncSkipIncomplete).append('\n');
         sb.append("vulkan_bda_shared_memory = ").append(bdaSharedMemory).append('\n');
+        sb.append("vulkan_ps_allow_fma = ").append(psAllowFma).append('\n');
+        sb.append("vulkan_ps_skip_zero_mul = ").append(psSkipZeroMul).append('\n');
+        sb.append("vulkan_vs_fast_math = ").append(vsFastMath).append('\n');
         sb.append("gpu_escala_render = ").append(renderScale).append('\n');
         for (Map.Entry<String, String> entry : extras.entrySet()) {
             sb.append(entry.getKey()).append(" = ").append(entry.getValue()).append('\n');
@@ -297,6 +321,9 @@ final class Pgr4Config {
                 || "vsync".equals(key)
                 || "vulkan_async_skip_incomplete_frames".equals(key)
                 || "vulkan_bda_shared_memory".equals(key)
+                || "vulkan_ps_allow_fma".equals(key)
+                || "vulkan_ps_skip_zero_mul".equals(key)
+                || "vulkan_vs_fast_math".equals(key)
                 || "gpu_escala_render".equals(key);
     }
 
