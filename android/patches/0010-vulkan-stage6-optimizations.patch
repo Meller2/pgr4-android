@@ -1,0 +1,139 @@
+diff --git a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 0ad54fc..e18de87 100644
+--- a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -1137,6 +1137,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   bool vs_fast_math_ = false;
+   bool vs_batch_vfetch_ = false;
+   spv::Id type_shared_memory_bda_ptr_ = spv::NoResult;
++  spv::Id type_shared_memory_bda_uvec2_ptr_ = spv::NoResult;
++  spv::Id type_shared_memory_bda_uvec4_ptr_ = spv::NoResult;
+   spv::Id main_shared_memory_bda_ptr_ = spv::NoResult;
+ };
+ 
+diff --git a/sdk/src/graphics/pipeline/render_target/cache.cpp b/sdk/src/graphics/pipeline/render_target/cache.cpp
+index 577cec1..3ba5dee 100644
+--- a/sdk/src/graphics/pipeline/render_target/cache.cpp
++++ b/sdk/src/graphics/pipeline/render_target/cache.cpp
+@@ -792,13 +792,20 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+           blend.alpha_comb_fcn != xenos::BlendOp::kAdd) {
+         return false;
+       }
++      const bool stencil_always_passes =
++          !normalized_depth_control.stencil_enable ||
++          normalized_depth_control.stencilfunc == xenos::CompareFunction::kAlways;
+       return (!normalized_depth_control.z_enable ||
+               normalized_depth_control.zfunc == xenos::CompareFunction::kAlways) &&
+-             !normalized_depth_control.stencil_enable;
++             stencil_always_passes;
+     }
++    const bool stencil_always_overwrites =
++        !normalized_depth_control.stencil_enable ||
++        (normalized_depth_control.stencilfunc == xenos::CompareFunction::kAlways &&
++         normalized_depth_control.stencilzpass == xenos::StencilOp::kReplace);
+     return normalized_depth_control.z_enable && normalized_depth_control.z_write_enable &&
+            normalized_depth_control.zfunc == xenos::CompareFunction::kAlways &&
+-           !normalized_depth_control.stencil_enable;
++           stencil_always_overwrites;
+   };
+ 
+   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+index 5ad6997..9056cc3 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -27,9 +27,9 @@
+ #include <rex/math.h>
+ #include <rex/string/buffer.h>
+ 
+-REXCVAR_DEFINE_BOOL(vulkan_ps_allow_fma, false, "GPU/Vulkan",
++REXCVAR_DEFINE_BOOL(vulkan_ps_allow_fma, true, "GPU/Vulkan",
+                     "Omit NoContraction in non-depth pixel shaders to allow FMA fusion");
+-REXCVAR_DEFINE_BOOL(vulkan_ps_skip_zero_mul, false, "GPU/Vulkan",
++REXCVAR_DEFINE_BOOL(vulkan_ps_skip_zero_mul, true, "GPU/Vulkan",
+                     "Skip SM3 0*NaN/Inf=0 guard in non-depth pixel shaders");
+ REXCVAR_DEFINE_BOOL(vulkan_ps_relaxed_precision, false, "GPU/Vulkan",
+                     "Decorate non-depth pixel shader ALU ops with RelaxedPrecision (FP16)");
+@@ -181,6 +181,8 @@ void SpirvShaderTranslator::Reset() {
+   cf_exec_conditional_merge_ = nullptr;
+   cf_instruction_predicate_merge_ = nullptr;
+   type_shared_memory_bda_ptr_ = spv::NoResult;
++  type_shared_memory_bda_uvec2_ptr_ = spv::NoResult;
++  type_shared_memory_bda_uvec4_ptr_ = spv::NoResult;
+   main_shared_memory_bda_ptr_ = spv::NoResult;
+ }
+ 
+@@ -499,6 +501,10 @@ void SpirvShaderTranslator::StartTranslation() {
+       builder_->addDecoration(type_bda_block, spv::DecorationBlock);
+       type_shared_memory_bda_ptr_ =
+           builder_->makePointer(spv::StorageClassPhysicalStorageBuffer, type_bda_block);
++      type_shared_memory_bda_uvec2_ptr_ =
++          builder_->makePointer(spv::StorageClassPhysicalStorageBuffer, type_uint2_);
++      type_shared_memory_bda_uvec4_ptr_ =
++          builder_->makePointer(spv::StorageClassPhysicalStorageBuffer, type_uint4_);
+     }
+   }
+ 
+@@ -4208,6 +4214,62 @@ spv::Id SpirvShaderTranslator::LoadUint32VectorFromSharedMemory(spv::Id base_add
+   }
+ 
+   spv::Id vec_type = type_uint_vectors_[word_count - 1];
++  if (main_shared_memory_bda_ptr_ != spv::NoResult) {
++    bool contiguous = true;
++    for (uint32_t i = 1; i < word_count; ++i) {
++      if (word_offsets[i] != word_offsets[0] + int32_t(i)) {
++        contiguous = false;
++        break;
++      }
++    }
++    if (contiguous && word_count >= 2) {
++      spv::Id first_addr = make_word_address(word_offsets[0]);
++      spv::Id safe_base = builder_->createBinOp(
++          spv::OpBitwiseAnd, type_int_, first_addr,
++          builder_->makeIntConstant(int((1u << (29 - 2)) - 1)));
++      // Clamp so a 2/3/4-word vector load can never cross the 512 MB boundary.
++      safe_base = builder_->createBuiltinCall(
++          type_int_, ext_inst_glsl_std_450_, GLSLstd450UMin,
++          {safe_base, builder_->makeIntConstant(int((1u << (29 - 2)) - word_count))});
++      if (word_count == 2 || word_count == 4) {
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(const_int_0_);
++        id_vector_temp_.push_back(safe_base);
++        spv::Id elem_ptr = builder_->createAccessChain(
++            spv::StorageClassPhysicalStorageBuffer, main_shared_memory_bda_ptr_, id_vector_temp_);
++        spv::Id vec_ptr = builder_->createUnaryOp(
++            spv::OpBitcast,
++            word_count == 4 ? type_shared_memory_bda_uvec4_ptr_
++                            : type_shared_memory_bda_uvec2_ptr_,
++            elem_ptr);
++        return builder_->createLoad(vec_ptr, spv::NoPrecision, spv::MemoryAccessAlignedMask,
++                                    spv::ScopeMax, 4);
++      }
++      // word_count == 3: one 64-bit uvec2 load + one 32-bit uint load.
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(const_int_0_);
++      id_vector_temp_.push_back(safe_base);
++      spv::Id ptr0 = builder_->createAccessChain(
++          spv::StorageClassPhysicalStorageBuffer, main_shared_memory_bda_ptr_, id_vector_temp_);
++      spv::Id vec01 = builder_->createLoad(
++          builder_->createUnaryOp(spv::OpBitcast, type_shared_memory_bda_uvec2_ptr_, ptr0),
++          spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
++      spv::Id addr2 = builder_->createBinOp(spv::OpIAdd, type_int_, safe_base,
++                                            builder_->makeIntConstant(2));
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(const_int_0_);
++      id_vector_temp_.push_back(addr2);
++      spv::Id ptr2 = builder_->createAccessChain(
++          spv::StorageClassPhysicalStorageBuffer, main_shared_memory_bda_ptr_, id_vector_temp_);
++      spv::Id w2 = builder_->createLoad(ptr2, spv::NoPrecision, spv::MemoryAccessAlignedMask,
++                                        spv::ScopeMax, 4);
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(builder_->createCompositeExtract(vec01, type_uint_, 0));
++      id_vector_temp_.push_back(builder_->createCompositeExtract(vec01, type_uint_, 1));
++      id_vector_temp_.push_back(w2);
++      return builder_->createCompositeConstruct(vec_type, id_vector_temp_);
++    }
++  }
+   uint32_t binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
+   if (main_shared_memory_bda_ptr_ != spv::NoResult || !vs_batch_vfetch_ || !binding_count_log2) {
+     spv::Id loaded_words[4];
