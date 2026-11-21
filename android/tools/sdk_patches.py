@@ -13,6 +13,7 @@ PATCHES = [
     ("0004-profile-pgr4-pm4-bin-replay.patch", []),
     ("0005-vulkan-hoist-shared-memory-uploads.patch", ["--ignore-whitespace"]),
     ("0006-vulkan-stage1-stage2-optimizations.patch", []),
+    ("0007-vulkan-stage3-optimizations.patch", []),
 ]
 
 
