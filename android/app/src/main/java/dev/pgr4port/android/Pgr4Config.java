@@ -26,8 +26,14 @@ final class Pgr4Config {
     private static final String KEY_HUD_ENABLED = "hud_enabled";
     private static final String KEY_TOUCH_ENABLED = "touch_enabled";
     private static final String KEY_TOUCH_OPACITY = "touch_opacity";
+    private static final String KEY_STEERING_MODE = "steering_mode";
+    private static final String KEY_GYRO_SENSITIVITY = "gyro_sensitivity";
     private static final String KEY_UI_LANGUAGE = "ui_language";
     private static final String KEY_AUTO_CONFIGURED = "auto_configured";
+
+    static final String STEER_STICK = "stick";
+    static final String STEER_GYRO = "gyro";
+    static final String STEER_BUTTONS = "buttons";
 
     // Engine TOML settings
     String driverDir = "";
@@ -47,6 +53,8 @@ final class Pgr4Config {
     boolean hudEnabled = true;
     boolean touchEnabled = true;
     int touchOpacity = 65; // percent 20..100
+    String steeringMode = STEER_STICK;
+    int gyroSensitivity = 135;
     String uiLanguage = "auto";
     boolean autoConfigured = false;
 
@@ -70,6 +78,8 @@ final class Pgr4Config {
         hudEnabled = prefs.getBoolean(KEY_HUD_ENABLED, true);
         touchEnabled = prefs.getBoolean(KEY_TOUCH_ENABLED, true);
         touchOpacity = prefs.getInt(KEY_TOUCH_OPACITY, 65);
+        steeringMode = prefs.getString(KEY_STEERING_MODE, STEER_STICK);
+        gyroSensitivity = prefs.getInt(KEY_GYRO_SENSITIVITY, 135);
         uiLanguage = prefs.getString(KEY_UI_LANGUAGE, "auto");
         autoConfigured = prefs.getBoolean(KEY_AUTO_CONFIGURED, false);
 
@@ -162,6 +172,8 @@ final class Pgr4Config {
                 .putBoolean(KEY_HUD_ENABLED, hudEnabled)
                 .putBoolean(KEY_TOUCH_ENABLED, touchEnabled)
                 .putInt(KEY_TOUCH_OPACITY, touchOpacity)
+                .putString(KEY_STEERING_MODE, steeringMode)
+                .putInt(KEY_GYRO_SENSITIVITY, gyroSensitivity)
                 .putString(KEY_UI_LANGUAGE, uiLanguage)
                 .putBoolean(KEY_AUTO_CONFIGURED, autoConfigured)
                 .commit();

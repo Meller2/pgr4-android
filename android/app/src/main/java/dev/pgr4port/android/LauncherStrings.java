@@ -73,9 +73,18 @@ final class LauncherStrings {
     String systemDriverName() { return t("System Vulkan Driver", "Системный драйвер Vulkan"); }
     String systemDriverDesc() { return t("Built-in device GPU driver", "Встроенный драйвер устройства"); }
     String driverAdrenoHint() {
-        return t("Snapdragon Adreno detected. Turnip drivers (.zip) usually give the best FPS and shadow accuracy.",
-                 "Обнаружен Snapdragon Adreno. Драйверы Turnip (.zip) обычно дают лучший FPS и правильные тени.");
+        return t("Snapdragon Adreno detected. A Turnip driver (.zip) is required — the built-in system driver causes a black screen in race.",
+                 "Обнаружен Snapdragon Adreno. Нужен драйвер Turnip (.zip) — со встроенным системным драйвером в игре чёрный экран.");
     }
+    String driverAdrenoMissingWarning() {
+        return t("Turnip Driver Recommended", "Требуется драйвер Turnip");
+    }
+    String driverAdrenoMissingBody() {
+        return t("The system Qualcomm driver shows a black screen in PGR4. Download and install a Turnip .zip driver first.",
+                 "На системном драйвере Qualcomm в PGR4 чёрный экран. Скачайте и установите Turnip (.zip) во вкладке «Драйверы».");
+    }
+    String btnOpenDrivers() { return t("Open Drivers", "Открыть драйверы"); }
+    String btnDownloadTurnip() { return t("Download Turnip (GitHub)", "Скачать Turnip (GitHub)"); }
     String driverMaliHint() {
         return t("Mali / non-Adreno GPU detected. Custom Turnip drivers are not compatible with this GPU — use the System Driver and Compatible preset.",
                  "Обнаружен Mali / другой GPU. Драйверы Turnip подходят только для Snapdragon — используйте системный драйвер и совместимый профиль.");

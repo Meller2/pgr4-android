@@ -458,6 +458,20 @@ public final class LauncherActivity extends Activity {
         }
         contentContainer.addView(topCards, cardMarginParams());
 
+        // Adreno warning if still on system driver
+        if (systemGpuInfo != null && systemGpuInfo.isAdreno() && currentDriver.isSystem) {
+            LinearLayout adrenoWarn = LauncherTheme.makeCard(this, true);
+            adrenoWarn.addView(LauncherTheme.makeTitle(this, s.driverAdrenoMissingWarning()));
+            addSpace(adrenoWarn, 4);
+            adrenoWarn.addView(LauncherTheme.makeSubtitle(this, s.driverAdrenoMissingBody()));
+            addSpace(adrenoWarn, 10);
+            adrenoWarn.addView(LauncherTheme.makeSecondaryButton(this, s.btnOpenDrivers(), v -> {
+                currentTab = TAB_DRIVERS;
+                refreshUi();
+            }));
+            contentContainer.addView(adrenoWarn, cardMarginParams());
+        }
+
         // Driver warning if custom probe failed
         if (!lastProbeOk && !lastProbeBanner.isEmpty()) {
             LinearLayout warn = LauncherTheme.makeCard(this, true);
@@ -594,6 +608,15 @@ public final class LauncherActivity extends Activity {
         actionRow.addView(installBtn, alp1);
         actionRow.addView(testBtn, alp2);
         gpuCard.addView(actionRow);
+
+        if (systemGpuInfo == null || systemGpuInfo.isAdreno()) {
+            addSpace(gpuCard, 8);
+            gpuCard.addView(LauncherTheme.makeSecondaryButton(this, s.btnDownloadTurnip(), v -> {
+                Intent browser = new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://github.com/K11MCH1/AdrenoToolsDrivers/releases"));
+                startActivity(browser);
+            }));
+        }
 
         if (!lastProbeBanner.isEmpty()) {
             addSpace(gpuCard, 10);
@@ -756,6 +779,52 @@ public final class LauncherActivity extends Activity {
                     config.touchEnabled = val;
                     config.savePrefsOnly();
                 });
+
+        addSpace(ctrlCard, 8);
+        ctrlCard.addView(LauncherTheme.makeCaption(this, s.t("Steering Mode", "Режим руления")));
+        addSpace(ctrlCard, 6);
+        LinearLayout steerRow = new LinearLayout(this);
+        steerRow.setOrientation(LinearLayout.HORIZONTAL);
+        String[][] steerModes = {
+            {Pgr4Config.STEER_STICK, s.t("Analog Stick", "Стик")},
+            {Pgr4Config.STEER_GYRO, s.t("Tilt / Gyro", "Гироскоп")},
+            {Pgr4Config.STEER_BUTTONS, s.t("D-Pad", "Кнопки")}
+        };
+        for (int i = 0; i < steerModes.length; i++) {
+            final String mode = steerModes[i][0];
+            TextView pill = LauncherTheme.makePillButton(this, steerModes[i][1], mode.equals(config.steeringMode), v -> {
+                config.steeringMode = mode;
+                config.savePrefsOnly();
+                refreshUi();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (i < steerModes.length - 1) lp.rightMargin = LauncherTheme.dp(this, 6);
+            steerRow.addView(pill, lp);
+        }
+        ctrlCard.addView(steerRow);
+
+        if (Pgr4Config.STEER_GYRO.equals(config.steeringMode)) {
+            addSpace(ctrlCard, 10);
+            ctrlCard.addView(LauncherTheme.makeCaption(this, s.t("Tilt Sensitivity", "Чувствительность наклона")));
+            addSpace(ctrlCard, 6);
+            LinearLayout sensRow = new LinearLayout(this);
+            sensRow.setOrientation(LinearLayout.HORIZONTAL);
+            int[] sensVals = {100, 135, 180};
+            for (int i = 0; i < sensVals.length; i++) {
+                final int sv = sensVals[i];
+                TextView pill = LauncherTheme.makePillButton(this, sv + "%", config.gyroSensitivity == sv, v -> {
+                    config.gyroSensitivity = sv;
+                    config.savePrefsOnly();
+                    refreshUi();
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                if (i < sensVals.length - 1) lp.rightMargin = LauncherTheme.dp(this, 6);
+                sensRow.addView(pill, lp);
+            }
+            ctrlCard.addView(sensRow);
+        }
 
         addSpace(ctrlCard, 8);
         ctrlCard.addView(LauncherTheme.makeCaption(this, s.t("Touch Opacity", "Прозрачность кнопок")));

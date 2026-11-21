@@ -42,8 +42,7 @@ public final class GameActivity extends SDLActivity {
         if (!mBrokenLibraries) {
             Pgr4Config cfg = new Pgr4Config(this);
             if (cfg.touchEnabled) {
-                touchPad = new TouchPad(this);
-                touchPad.setOpacityPercent(cfg.touchOpacity);
+                touchPad = new TouchPad(this, cfg);
                 addContentView(touchPad, new ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             }
@@ -61,6 +60,9 @@ public final class GameActivity extends SDLActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (touchPad != null) {
+            touchPad.resume();
+        }
         if (performanceHud != null) {
             performanceHud.resume();
         }
@@ -72,7 +74,7 @@ public final class GameActivity extends SDLActivity {
             performanceHud.pause();
         }
         if (touchPad != null) {
-            touchPad.reset();
+            touchPad.pause();
         }
         super.onPause();
     }
