@@ -6,6 +6,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.view.ViewGroup;
 import java.io.File;
@@ -29,6 +30,7 @@ public final class GameActivity extends SDLActivity {
             Log.w("PGR4", "Could not set the ReXGlue app folder", error);
         }
         super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (!mBrokenLibraries) {
             touchPad = new TouchPad(this);
             addContentView(touchPad, new ViewGroup.LayoutParams(

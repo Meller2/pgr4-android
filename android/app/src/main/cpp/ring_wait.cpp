@@ -23,9 +23,30 @@ ReadPointerSignal FindReadPointerSignal() {
   if (!plugin) {
     return {};
   }
+  auto* sequence = static_cast<std::atomic<uint32_t>*>(dlsym(plugin, "rex_cp_rptr_seq"));
+  auto* waiters = static_cast<std::atomic<uint32_t>*>(dlsym(plugin, "rex_cp_rptr_waiters"));
+  if (!sequence || !waiters) {
+    dlclose(plugin);
+    return {};
+  }
   // Keep the plugin referenced for the lifetime of these pointers.
-  return {static_cast<std::atomic<uint32_t>*>(dlsym(plugin, "rex_cp_rptr_seq")),
-          static_cast<std::atomic<uint32_t>*>(dlsym(plugin, "rex_cp_rptr_waiters"))};
+  return {sequence, waiters};
+}
+
+ReadPointerSignal GetReadPointerSignal() {
+  static std::atomic<std::atomic<uint32_t>*> cached_sequence{nullptr};
+  static std::atomic<std::atomic<uint32_t>*> cached_waiters{nullptr};
+  auto* sequence = cached_sequence.load(std::memory_order_acquire);
+  auto* waiters = cached_waiters.load(std::memory_order_acquire);
+  if (sequence && waiters) {
+    return {sequence, waiters};
+  }
+  const ReadPointerSignal found = FindReadPointerSignal();
+  if (found.sequence && found.waiters) {
+    cached_waiters.store(found.waiters, std::memory_order_relaxed);
+    cached_sequence.store(found.sequence, std::memory_order_release);
+  }
+  return found;
 }
 
 }  // namespace
@@ -33,7 +54,7 @@ ReadPointerSignal FindReadPointerSignal() {
 REX_HOOK_RAW(sub_82697970) {
   // Base-disc ring space loop in sub_82698B80. Other callers retain their timing.
   if (ctx.lr == 0x82698C10) {
-    static const ReadPointerSignal signal = FindReadPointerSignal();
+    const ReadPointerSignal signal = GetReadPointerSignal();
     if (signal.sequence && signal.waiters) {
       const uint32_t state = ctx.r3.u32;
       const uint32_t device = REX_LOAD_U32(state);

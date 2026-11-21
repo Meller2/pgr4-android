@@ -15,13 +15,21 @@ extern "C" JNIEXPORT void JNICALL Java_dev_pgr4port_android_TouchPad_nativeSetSt
 
 extern "C" JNIEXPORT jfloat JNICALL Java_dev_pgr4port_android_PerformanceHud_nativeGuestFps(
     JNIEnv*, jclass) {
-  // The SDK loads the Xenos plugin after the activity starts. Never load it here.
-  void* plugin = dlopen("librexgpu-xenos.so", RTLD_NOW | RTLD_NOLOAD);
-  if (!plugin) {
-    return -1.0f;
+  static std::atomic<const std::atomic<float>*> cached_fps{nullptr};
+  const auto* fps = cached_fps.load(std::memory_order_acquire);
+  if (!fps) {
+    // The SDK loads the Xenos plugin after the activity starts. Never load it here.
+    void* plugin = dlopen("librexgpu-xenos.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!plugin) {
+      return -1.0f;
+    }
+    fps = static_cast<const std::atomic<float>*>(dlsym(plugin, "rex_fps_guest"));
+    if (!fps) {
+      dlclose(plugin);
+      return -1.0f;
+    }
+    // Keep the plugin referenced once the symbol is cached.
+    cached_fps.store(fps, std::memory_order_release);
   }
-  auto* fps = static_cast<const std::atomic<float>*>(dlsym(plugin, "rex_fps_guest"));
-  float result = fps ? fps->load(std::memory_order_relaxed) : -1.0f;
-  dlclose(plugin);
-  return result;
+  return fps->load(std::memory_order_relaxed);
 }

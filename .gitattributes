@@ -1,4 +1,5 @@
 /android/gradlew text eol=lf
 /android/gradlew.bat text eol=crlf
 *.yml text eol=lf
+*.toml text eol=lf
 android/patches/*.patch text eol=lf
