@@ -15,6 +15,7 @@ PATCHES = [
     ("0006-vulkan-stage1-stage2-optimizations.patch", []),
     ("0007-vulkan-stage3-optimizations.patch", []),
     ("0008-vulkan-stage4-optimizations.patch", []),
+    ("0009-vulkan-stage5-optimizations.patch", []),
 ]
 
 

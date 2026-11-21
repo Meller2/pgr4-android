@@ -1,0 +1,365 @@
+diff --git a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 1b6d946..0ad54fc 100644
+--- a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -307,6 +307,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     uint32_t vertex_index_max;
+     float tessellation_factor_range_min;
+     float tessellation_factor_range_max;
++
++    // 64-bit GPU buffer device address for shared memory (lo, hi, pad, pad).
++    uint32_t shared_memory_bda[4];
+   };
+ 
+   enum ConstantBuffer : uint32_t {
+@@ -399,6 +402,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+     bool demote_to_helper_invocation;
+     bool sample_rate_shading;
++    bool buffer_device_address;
+   };
+ 
+   SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
+@@ -926,6 +930,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     kSystemConstantEdramRTKeepMask,
+     kSystemConstantEdramRTClamp,
+     kSystemConstantEdramBlendConstant,
++    kSystemConstantSharedMemoryBda,
+   };
+   spv::Id uniform_system_constants_;
+   spv::Id uniform_float_constants_;
+@@ -1131,6 +1136,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   bool ps_relaxed_precision_ = false;
+   bool vs_fast_math_ = false;
+   bool vs_batch_vfetch_ = false;
++  spv::Id type_shared_memory_bda_ptr_ = spv::NoResult;
++  spv::Id main_shared_memory_bda_ptr_ = spv::NoResult;
+ };
+ 
+ }  // namespace rex::graphics
+diff --git a/sdk/include/rex/graphics/vulkan/shared_memory.h b/sdk/include/rex/graphics/vulkan/shared_memory.h
+index 6c52f28..7c9ff95 100644
+--- a/sdk/include/rex/graphics/vulkan/shared_memory.h
++++ b/sdk/include/rex/graphics/vulkan/shared_memory.h
+@@ -48,6 +48,7 @@ class VulkanSharedMemory : public SharedMemory {
+   void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {});
+ 
+   VkBuffer buffer() const { return buffer_; }
++  uint64_t buffer_device_address() const { return buffer_device_address_; }
+ 
+   void OnBeginRenderPass();
+ 
+@@ -68,6 +69,7 @@ class VulkanSharedMemory : public SharedMemory {
+   VkPipelineStageFlags guest_shader_pipeline_stages_;
+ 
+   VkBuffer buffer_ = VK_NULL_HANDLE;
++  uint64_t buffer_device_address_ = 0;
+   uint32_t buffer_memory_type_;
+   // Single for non-sparse, every allocation so far for sparse.
+   std::vector<VkDeviceMemory> buffer_memory_;
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+index a2405ff..5ad6997 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -37,6 +37,8 @@ REXCVAR_DEFINE_BOOL(vulkan_vs_fast_math, true, "GPU/Vulkan",
+                     "Allow FMA and skip SM3 0*NaN/Inf=0 guard in vertex shaders");
+ REXCVAR_DEFINE_BOOL(vulkan_vs_batch_vfetch, true, "GPU/Vulkan",
+                     "Batch multi-word vfetch shared-memory bank switches in shaders");
++REXCVAR_DEFINE_BOOL(vulkan_bda_shared_memory, true, "GPU/Vulkan",
++                    "Use VK_KHR_buffer_device_address for read-only shared-memory vfetch");
+ 
+ namespace rex::graphics {
+ 
+@@ -54,7 +56,8 @@ SpirvShaderTranslator::Features::Features(bool all)
+       rounding_mode_rte_float32(all),
+       fragment_shader_sample_interlock(all),
+       demote_to_helper_invocation(all),
+-      sample_rate_shading(all) {}
++      sample_rate_shading(all),
++      buffer_device_address(all) {}
+ 
+ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
+     : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
+@@ -71,7 +74,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+       rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
+       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
+       demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
+-      sample_rate_shading(vulkan_device->properties().sampleRateShading) {
++      sample_rate_shading(vulkan_device->properties().sampleRateShading),
++      buffer_device_address(vulkan_device->properties().bufferDeviceAddress &&
++                            REXCVAR_GET(vulkan_bda_shared_memory)) {
+   const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
+   if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+     spirv_version = spv::Spv_1_5;
+@@ -175,6 +180,8 @@ void SpirvShaderTranslator::Reset() {
+ 
+   cf_exec_conditional_merge_ = nullptr;
+   cf_instruction_predicate_merge_ = nullptr;
++  type_shared_memory_bda_ptr_ = spv::NoResult;
++  main_shared_memory_bda_ptr_ = spv::NoResult;
+ }
+ 
+ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+@@ -201,8 +208,17 @@ void SpirvShaderTranslator::StartTranslation() {
+       builder_->addExtension("SPV_KHR_float_controls");
+     }
+   }
++  const bool use_shared_memory_bda =
++      features_.buffer_device_address && features_.spirv_version >= spv::Spv_1_5 &&
++      GetSharedMemoryStorageBufferCountLog2() > 0 && is_vertex_shader() &&
++      !current_shader().memexport_eM_written();
++  if (use_shared_memory_bda) {
++    builder_->addCapability(spv::CapabilityPhysicalStorageBufferAddresses);
++  }
+   ext_inst_glsl_std_450_ = builder_->import("GLSL.std.450");
+-  builder_->setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
++  builder_->setMemoryModel(use_shared_memory_bda ? spv::AddressingModelPhysicalStorageBuffer64
++                                                 : spv::AddressingModelLogical,
++                           spv::MemoryModelGLSL450);
+   builder_->setSource(spv::SourceLanguageUnknown, 0);
+ 
+   type_void_ = builder_->makeVoidType();
+@@ -326,6 +342,7 @@ void SpirvShaderTranslator::StartTranslation() {
+       {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
+       {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
+       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
++      {"shared_memory_bda", offsetof(SystemConstants, shared_memory_bda), type_uint2_},
+   };
+   id_vector_temp_.clear();
+   id_vector_temp_.reserve(rex::countof(system_constants));
+@@ -471,6 +488,18 @@ void SpirvShaderTranslator::StartTranslation() {
+     if (features_.spirv_version >= spv::Spv_1_4) {
+       main_interface_.push_back(buffers_shared_memory_);
+     }
++    if (use_shared_memory_bda) {
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(builder_->makeRuntimeArray(type_uint_));
++      builder_->addDecoration(id_vector_temp_.back(), spv::DecorationArrayStride, sizeof(uint32_t));
++      spv::Id type_bda_block = builder_->makeStructType(id_vector_temp_, "XeSharedMemoryBda");
++      builder_->addMemberName(type_bda_block, 0, "data");
++      builder_->addMemberDecoration(type_bda_block, 0, spv::DecorationNonWritable);
++      builder_->addMemberDecoration(type_bda_block, 0, spv::DecorationOffset, 0);
++      builder_->addDecoration(type_bda_block, spv::DecorationBlock);
++      type_shared_memory_bda_ptr_ =
++          builder_->makePointer(spv::StorageClassPhysicalStorageBuffer, type_bda_block);
++    }
+   }
+ 
+   if (is_vertex_shader()) {
+@@ -494,6 +523,16 @@ void SpirvShaderTranslator::StartTranslation() {
+       builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
+                                                        uniform_system_constants_, id_vector_temp_),
+                            spv::NoPrecision);
++  if (type_shared_memory_bda_ptr_ != spv::NoResult) {
++    id_vector_temp_.clear();
++    id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantSharedMemoryBda));
++    spv::Id bda_uvec2 = builder_->createLoad(
++        builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
++                                    id_vector_temp_),
++        spv::NoPrecision);
++    main_shared_memory_bda_ptr_ =
++        builder_->createUnaryOp(spv::OpBitcast, type_shared_memory_bda_ptr_, bda_uvec2);
++  }
+ 
+   if (!is_depth_only_fragment_shader_) {
+     // Begin ucode translation. Initialize everything, even without defined
+@@ -4073,6 +4112,22 @@ spv::Id SpirvShaderTranslator::EndianSwap128Uint4(spv::Id value, spv::Id endian)
+ }
+ 
+ spv::Id SpirvShaderTranslator::LoadUint32FromSharedMemory(spv::Id address_dwords_int) {
++  if (main_shared_memory_bda_ptr_ != spv::NoResult) {
++    // Direct 64-bit GPU pointer load across the full 512 MB shared memory
++    // buffer - no 128 MB bank switch or branch divergence. Mask to 512 MB
++    // (128M dwords) so out-of-bounds indices can never fault.
++    spv::Id safe_address = builder_->createBinOp(
++        spv::OpBitwiseAnd, type_int_, address_dwords_int,
++        builder_->makeIntConstant(int((1u << (29 - 2)) - 1)));
++    id_vector_temp_.clear();
++    id_vector_temp_.push_back(const_int_0_);
++    id_vector_temp_.push_back(safe_address);
++    spv::Id ptr = builder_->createAccessChain(spv::StorageClassPhysicalStorageBuffer,
++                                              main_shared_memory_bda_ptr_, id_vector_temp_);
++    return builder_->createLoad(ptr, spv::NoPrecision, spv::MemoryAccessAlignedMask,
++                                spv::ScopeMax, 4);
++  }
++
+   spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
+                                         ? spv::StorageClassStorageBuffer
+                                         : spv::StorageClassUniform;
+@@ -4154,7 +4209,7 @@ spv::Id SpirvShaderTranslator::LoadUint32VectorFromSharedMemory(spv::Id base_add
+ 
+   spv::Id vec_type = type_uint_vectors_[word_count - 1];
+   uint32_t binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
+-  if (!vs_batch_vfetch_ || !binding_count_log2) {
++  if (main_shared_memory_bda_ptr_ != spv::NoResult || !vs_batch_vfetch_ || !binding_count_log2) {
+     spv::Id loaded_words[4];
+     for (uint32_t i = 0; i < word_count; ++i) {
+       loaded_words[i] = LoadUint32FromSharedMemory(make_word_address(word_offsets[i]));
+diff --git a/sdk/src/graphics/vulkan/command_processor.cpp b/sdk/src/graphics/vulkan/command_processor.cpp
+index 8164820..7adf90b 100644
+--- a/sdk/src/graphics/vulkan/command_processor.cpp
++++ b/sdk/src/graphics/vulkan/command_processor.cpp
+@@ -6992,6 +6992,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+   }
+   dirty |= system_constants_.flags != flags;
+   system_constants_.flags = flags;
++  if (shared_memory_) {
++    const uint64_t bda = shared_memory_->buffer_device_address();
++    const uint32_t bda_lo = uint32_t(bda);
++    const uint32_t bda_hi = uint32_t(bda >> 32);
++    dirty |= system_constants_.shared_memory_bda[0] != bda_lo ||
++             system_constants_.shared_memory_bda[1] != bda_hi;
++    system_constants_.shared_memory_bda[0] = bda_lo;
++    system_constants_.shared_memory_bda[1] = bda_hi;
++  }
+ 
+   // Index buffer address for loading in the shaders.
+   if (flags & (SpirvShaderTranslator::kSysFlag_VertexIndexLoad |
+diff --git a/sdk/src/graphics/vulkan/render_target_cache.cpp b/sdk/src/graphics/vulkan/render_target_cache.cpp
+index 71730bf..33edb04 100644
+--- a/sdk/src/graphics/vulkan/render_target_cache.cpp
++++ b/sdk/src/graphics/vulkan/render_target_cache.cpp
+@@ -1428,6 +1428,51 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+       atalho.image = texture_cache.AcquireAtalhoImage(atalho.vk_format, atalho.host_width,
+                                                       atalho.host_height, atalho_image);
+     }
++    const bool can_direct_blit =
++        (direct_tex != nullptr || atalho.image >= 0) && !atalho_rt->key().is_depth &&
++        atalho_rt->key().msaa_samples == xenos::MsaaSamples::k1X && atalho_exp_factor == 1.0f &&
++        !resolve_info.copy_dest_info.copy_dest_swap &&
++        GetColorVulkanFormat(atalho_rt->key().GetColorFormat()) == atalho.vk_format;
++    if (can_direct_blit) {
++      command_processor_.MarcarGpu(VulkanCommandProcessor::GpuEtapa::kAtalho);
++      command_processor_.PushImageMemoryBarrier(
++          atalho_rt->image(),
++          ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
++          atalho_rt->current_stage_mask(), VK_PIPELINE_STAGE_TRANSFER_BIT,
++          atalho_rt->current_access_mask(), VK_ACCESS_TRANSFER_READ_BIT, atalho_rt->current_layout(),
++          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++      atalho_rt->SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++      if (direct_tex != nullptr) {
++        texture_cache.PrepareDirectAtalhoDestination(direct_tex, atalho_image);
++      }
++      command_processor_.SubmitBarriers(true);
++      VkImageBlit blit_region = {};
++      blit_region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++      blit_region.srcOffsets[0] = {int32_t(HostScaleX(atalho_rt_x)),
++                                   int32_t(HostScaleY(atalho_rt_y)), 0};
++      blit_region.srcOffsets[1] = {int32_t(HostScaleX(atalho_rt_x) + atalho.host_width),
++                                   int32_t(HostScaleY(atalho_rt_y) + atalho.host_height), 1};
++      blit_region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++      blit_region.dstOffsets[0] = {0, 0, 0};
++      blit_region.dstOffsets[1] = {int32_t(atalho.host_width), int32_t(atalho.host_height), 1};
++      command_buffer.CmdVkBlitImage(atalho_rt->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                                    atalho_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit_region,
++                                    VK_FILTER_NEAREST);
++      if (direct_tex != nullptr) {
++        texture_cache.TransitionTextureToSampled(direct_tex);
++        texture_cache.CompleteDirectAtalho(direct_tex, atalho);
++      } else {
++        texture_cache.AtalhoImageWritten(atalho.image);
++        texture_cache.AddAtalho(atalho);
++        texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
++                                          resolve_info.copy_dest_extent_length);
++      }
++      g_cp_times.atalho_resolves.fetch_add(1, std::memory_order_relaxed);
++      written_address_out = resolve_info.copy_dest_extent_start;
++      written_length_out = resolve_info.copy_dest_extent_length;
++      copied = true;
++    } else {
+     const uint32_t texel_bytes = atalho_mode == 2 ? 8 : 4;
+     VulkanCommandProcessor::ScratchBufferAcquisition atalho_buffer;
+     VkDescriptorSet atalho_dest_set = VK_NULL_HANDLE;
+@@ -1515,6 +1560,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+       texture_cache.ReleaseAtalhoImage(atalho.image);
+       atalho.image = -1;
+     }
++    }
+   }
+   if (resolve_info.copy_dest_extent_length && !skip_copies && !copied) {
+     draw_util::ResolveCopyShaderConstants copy_shader_constants;
+diff --git a/sdk/src/graphics/vulkan/shared_memory.cpp b/sdk/src/graphics/vulkan/shared_memory.cpp
+index 8b4504f..c3cc25e 100644
+--- a/sdk/src/graphics/vulkan/shared_memory.cpp
++++ b/sdk/src/graphics/vulkan/shared_memory.cpp
+@@ -67,8 +67,10 @@ bool VulkanSharedMemory::Initialize() {
+   buffer_create_info.pNext = nullptr;
+   buffer_create_info.flags = sparse_flags;
+   buffer_create_info.size = kBufferSize;
++  const bool use_bda = vulkan_device->properties().bufferDeviceAddress;
+   buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+-                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
++                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
++                             (use_bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+   buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+   buffer_create_info.queueFamilyIndexCount = 0;
+   buffer_create_info.pQueueFamilyIndices = nullptr;
+@@ -150,6 +152,15 @@ bool VulkanSharedMemory::Initialize() {
+       buffer_memory_dedicated_allocate_info.image = VK_NULL_HANDLE;
+       buffer_memory_dedicated_allocate_info.buffer = buffer_;
+     }
++    VkMemoryAllocateFlagsInfo buffer_memory_allocate_flags_info = {};
++    if (use_bda) {
++      buffer_memory_allocate_flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
++      buffer_memory_allocate_flags_info.pNext = nullptr;
++      buffer_memory_allocate_flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
++      buffer_memory_allocate_info_last->pNext = &buffer_memory_allocate_flags_info;
++      buffer_memory_allocate_info_last =
++          reinterpret_cast<VkMemoryAllocateInfo*>(&buffer_memory_allocate_flags_info);
++    }
+     VkDeviceMemory buffer_memory;
+     if (dfn.vkAllocateMemory(device, &buffer_memory_allocate_info, nullptr, &buffer_memory) !=
+         VK_SUCCESS) {
+@@ -168,6 +179,20 @@ bool VulkanSharedMemory::Initialize() {
+     }
+   }
+ 
++  buffer_device_address_ = 0;
++  if (use_bda && buffer_ != VK_NULL_HANDLE) {
++    auto get_bda = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
++        vulkan_device->vulkan_instance()->functions().vkGetDeviceProcAddr(
++            device, "vkGetBufferDeviceAddress"));
++    if (get_bda) {
++      VkBufferDeviceAddressInfo bda_info = {};
++      bda_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
++      bda_info.buffer = buffer_;
++      buffer_device_address_ = get_bda(device, &bda_info);
++      REXGPU_INFO("Shared memory: bufferDeviceAddress = 0x{:016X}", buffer_device_address_);
++    }
++  }
++
+   // The first usage will likely be uploading.
+   last_usage_ = Usage::kTransferDestination;
+   last_written_range_ = std::make_pair<uint32_t, uint32_t>(0, 0);
+@@ -282,7 +307,14 @@ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_alloca
+ 
+   VkMemoryAllocateInfo memory_allocate_info;
+   memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+-  memory_allocate_info.pNext = nullptr;
++  VkMemoryAllocateFlagsInfo allocate_flags_info = {};
++  if (vulkan_device->properties().bufferDeviceAddress) {
++    allocate_flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
++    allocate_flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
++    memory_allocate_info.pNext = &allocate_flags_info;
++  } else {
++    memory_allocate_info.pNext = nullptr;
++  }
+   memory_allocate_info.allocationSize = length_allocations
+                                         << host_gpu_memory_sparse_granularity_log2();
+   memory_allocate_info.memoryTypeIndex = buffer_memory_type_;
+diff --git a/sdk/src/ui/vulkan/vulkan_device.cpp b/sdk/src/ui/vulkan/vulkan_device.cpp
+index 9cab511..4fa6e8d 100644
+--- a/sdk/src/ui/vulkan/vulkan_device.cpp
++++ b/sdk/src/ui/vulkan/vulkan_device.cpp
+@@ -684,9 +684,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       XE_UI_VULKAN_FEATURE_2(features_1_2, samplerMirrorClampToEdge);
+       XE_UI_VULKAN_FEATURE_2(features_1_2, uniformBufferStandardLayout);
+       XE_UI_VULKAN_FEATURE_2(features_1_2, scalarBlockLayout);
++      XE_UI_VULKAN_FEATURE_2(features_1_2, bufferDeviceAddress);
+     }
+     if (REXCVAR_GET(vulkan_native_shader_features)) {
+-      XE_UI_VULKAN_FEATURE_2(features_1_2, bufferDeviceAddress);
+       XE_UI_VULKAN_FEATURE_2(features_1_2, runtimeDescriptorArray);
+       // Native renderer: unbounded textures and samplers that are added while the
+       // command buffer is already recording.
