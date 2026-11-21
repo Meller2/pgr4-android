@@ -1,0 +1,1196 @@
+diff --git a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 4b20317..1b6d946 100644
+--- a/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/sdk/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -515,6 +515,45 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+   // Builder helpers.
+   spv::Id SpirvSmearScalarResultOrConstant(spv::Id scalar, spv::Id vector_type);
++  bool IsPixelShaderFastMathEligible() const {
++    return is_pixel_shader() && !edram_fragment_shader_interlock_ &&
++           !is_depth_only_fragment_shader_ && !current_shader().writes_depth() &&
++           !IsWritingFloat24Depth() && !current_shader().memexport_eM_written();
++  }
++  bool AllowPixelShaderFma() const {
++    return (ps_allow_fma_ && IsPixelShaderFastMathEligible()) ||
++           (vs_fast_math_ && is_vertex_shader() && !current_shader().memexport_eM_written());
++  }
++  bool SkipPixelShaderZeroMulGuard() const {
++    return (ps_skip_zero_mul_ && IsPixelShaderFastMathEligible()) ||
++           (vs_fast_math_ && is_vertex_shader() && !current_shader().memexport_eM_written());
++  }
++  bool UsePixelShaderRelaxedPrecision() const {
++    return ps_relaxed_precision_ && IsPixelShaderFastMathEligible();
++  }
++  spv::Id CreateFloatUnaryOp(spv::Op op_code, spv::Id type_id, spv::Id operand) {
++    spv::Id id = AllowPixelShaderFma() ? builder_->createUnaryOp(op_code, type_id, operand)
++                                       : builder_->createNoContractionUnaryOp(op_code, type_id, operand);
++    if (UsePixelShaderRelaxedPrecision()) {
++      builder_->addDecoration(id, spv::DecorationRelaxedPrecision);
++    }
++    return id;
++  }
++  spv::Id CreateFloatBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1, spv::Id operand2) {
++    spv::Id id = AllowPixelShaderFma()
++                     ? builder_->createBinOp(op_code, type_id, operand1, operand2)
++                     : builder_->createNoContractionBinOp(op_code, type_id, operand1, operand2);
++    if (UsePixelShaderRelaxedPrecision()) {
++      builder_->addDecoration(id, spv::DecorationRelaxedPrecision);
++    }
++    return id;
++  }
++  spv::Id DecoratePsRelaxed(spv::Id id) {
++    if (id != spv::NoResult && UsePixelShaderRelaxedPrecision()) {
++      builder_->addDecoration(id, spv::DecorationRelaxedPrecision);
++    }
++    return id;
++  }
+ 
+   Modification GetSpirvShaderModification() const {
+     return Modification(current_translation().modification());
+@@ -662,6 +701,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   spv::Id EndianSwap128Uint4(spv::Id value, spv::Id endian);
+ 
+   spv::Id LoadUint32FromSharedMemory(spv::Id address_dwords_int);
++  spv::Id LoadUint32VectorFromSharedMemory(spv::Id base_address_dwords_int,
++                                           const int32_t* word_offsets, uint32_t word_count);
+   // If `replace_mask` is provided, the bits specified in the mask will be
+   // replaced with those from the value via OpAtomicAnd/Or.
+   // Bits of `value` not in `replace_mask` will be ignored.
+@@ -1085,6 +1126,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // the exec-level predicate value, and can't merge two execs with the same
+   // predicate condition anymore.
+   bool cf_exec_predicate_written_;
++  bool ps_allow_fma_ = false;
++  bool ps_skip_zero_mul_ = false;
++  bool ps_relaxed_precision_ = false;
++  bool vs_fast_math_ = false;
++  bool vs_batch_vfetch_ = false;
+ };
+ 
+ }  // namespace rex::graphics
+diff --git a/sdk/include/rex/graphics/shared_memory.h b/sdk/include/rex/graphics/shared_memory.h
+index ff83533..ff55efb 100644
+--- a/sdk/include/rex/graphics/shared_memory.h
++++ b/sdk/include/rex/graphics/shared_memory.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <mutex>
+ #include <utility>
+@@ -142,6 +143,7 @@ class SharedMemory {
+ 
+   virtual void OnRangesRequested(
+       const std::vector<std::pair<uint32_t, uint32_t>>& /*merged_ranges*/) {}
++  void InvalidateRequestRangeCache() { ++cp_current_epoch_; }
+ 
+  private:
+   memory::Memory& memory_;
+@@ -165,6 +167,12 @@ class SharedMemory {
+   std::vector<std::pair<uint32_t, uint32_t>> upload_ranges_;
+   std::vector<std::pair<uint32_t, uint32_t>> merged_ranges_;
+ 
++  std::atomic<uint64_t> valid_pages_seqlock_{2};
++  std::vector<uint64_t> cp_cached_valid_blocks_;
++  std::vector<uint64_t> cp_cached_block_epoch_;
++  uint64_t cp_current_epoch_ = 1;
++  uint64_t cp_last_seqlock_ = 0;
++
+   // Mutex between the guest memory subsystem and the command processor, to be
+   // locked when checking or updating validity of pages/ranges and when firing
+   // watches.
+diff --git a/sdk/include/rex/graphics/vulkan/command_processor.h b/sdk/include/rex/graphics/vulkan/command_processor.h
+index fc31cba..67007c2 100644
+--- a/sdk/include/rex/graphics/vulkan/command_processor.h
++++ b/sdk/include/rex/graphics/vulkan/command_processor.h
+@@ -882,6 +882,16 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Currently used samplers.
+   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_vertex_;
+   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_pixel_;
++  static constexpr size_t kCachedSamplerStageBuckets = 16;
++  struct CachedSamplerStageEntry {
++    const VulkanShader* shader = nullptr;
++    uint64_t submission = 0;
++    std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> samplers;
++    std::vector<std::pair<uint32_t, uint32_t>> fetch_gens;
++  };
++  CachedSamplerStageEntry cached_sampler_entries_[2][kCachedSamplerStageBuckets];
++  const CachedSamplerStageEntry* last_applied_sampler_entry_[2] = {};
++  uint32_t fetch_constant_gen_[32] = {};
+ 
+   // Cache render pass currently started in the command buffer with the
+   // framebuffer. For dynamic rendering, current_render_pass_ is VK_NULL_HANDLE
+@@ -891,6 +901,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+   bool in_render_pass_ = false;
+   bool hoisting_pre_rp_ = false;
+   uint64_t current_rp_seq_ = 0;
++  uint64_t last_rp_sampled_mark_seq_ = 0;
++  uint32_t last_rp_sampled_mark_mask_ = 0;
+   bool rp_used_memexport_ = false;
+   bool rp_used_scratch_buffer_ = false;
+ 
+diff --git a/sdk/include/rex/graphics/vulkan/render_target_cache.h b/sdk/include/rex/graphics/vulkan/render_target_cache.h
+index c7f8c5d..b354345 100644
+--- a/sdk/include/rex/graphics/vulkan/render_target_cache.h
++++ b/sdk/include/rex/graphics/vulkan/render_target_cache.h
+@@ -825,6 +825,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   bool color_32bit_transfer_uint_formats_supported_ = true;
+   bool color_rg16_draw_format_fallback_to_float_ = false;
+   bool color_rgba16_draw_format_fallback_to_float_ = false;
++  bool hdr_b10g11r11_supported_ = false;
+ 
+   // VK_NULL_HANDLE if failed to create.
+   std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKey::Hasher> render_passes_;
+diff --git a/sdk/src/graphics/command_processor.cpp b/sdk/src/graphics/command_processor.cpp
+index ec77737..71a410b 100644
+--- a/sdk/src/graphics/command_processor.cpp
++++ b/sdk/src/graphics/command_processor.cpp
+@@ -487,9 +487,16 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+   const uint32_t pitch = value & 0x3FFFu;
+   const bool pgr4_cubemap_msaa_cap =
+       REXCVAR_GET(gpu_sin_msaa) && pitch == 280 && regs.Get<reg::RB_COLOR_MASK>().value != 0;
+-  if (index == XE_GPU_REG_RB_SURFACE_INFO &&
+-      (pitch >= kMsaaCapMinPitch || (REXCVAR_GET(gpu_sin_msaa) && pitch == 320) ||
+-       pgr4_cubemap_msaa_cap)) {
++  const bool pgr4_4x_clear_to_1x =
++      REXCVAR_GET(gpu_sin_msaa) && ((value >> 16) & 3u) == 2u &&
++      (pitch == 640 || pitch == 160 || pitch == 120 ||
++       (pitch == 280 && regs.Get<reg::RB_COLOR_MASK>().value == 0));
++  if (index == XE_GPU_REG_RB_SURFACE_INFO && pgr4_4x_clear_to_1x) {
++    value = (value & ~(UINT32_C(0x3FFF) | (UINT32_C(3) << 16))) |
++            ((pitch * 2u) & 0x3FFFu) | (UINT32_C(1) << 14);
++  } else if (index == XE_GPU_REG_RB_SURFACE_INFO &&
++             (pitch >= kMsaaCapMinPitch || (REXCVAR_GET(gpu_sin_msaa) && pitch == 320) ||
++              pgr4_cubemap_msaa_cap)) {
+     const uint32_t asked = (value >> 16) & 3u;
+     if (asked) {
+       static bool reported = false;
+diff --git a/sdk/src/graphics/pipeline/render_target/cache.cpp b/sdk/src/graphics/pipeline/render_target/cache.cpp
+index ce6f55e..577cec1 100644
+--- a/sdk/src/graphics/pipeline/render_target/cache.cpp
++++ b/sdk/src/graphics/pipeline/render_target/cache.cpp
+@@ -710,7 +710,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+         !is_rasterization_done || !is_single_rect_draw || pixel_shader_kills_pixels) {
+       return false;
+     }
+-    if (regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type != xenos::PrimitiveType::kRectangleList) {
++    const auto guest_prim_type = regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type;
++    if (guest_prim_type != xenos::PrimitiveType::kRectangleList &&
++        guest_prim_type != xenos::PrimitiveType::kTriangleStrip &&
++        guest_prim_type != xenos::PrimitiveType::kQuadList) {
+       return false;
+     }
+     auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+@@ -734,6 +737,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+       return false;
+     }
+     const bool covers_full_rt =
++        guest_prim_type == xenos::PrimitiveType::kRectangleList &&
+         scissor.extent[0] >= rt_width && scissor.extent[1] >= rt_covered_height;
+     // Small post-FX / bloom / mip scratch passes (e.g. 64x64, 160x90, 320x180)
+     // have EDRAM-aligned rt_width/rt_covered_height larger than the actual scissor
+@@ -744,10 +748,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+         rt_bit_index >= 1 && rt_width <= 320 && scissor.extent[1] + tile_h >= rt_covered_height;
+     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
+     if (!pa_cl_vte_cntl.vport_x_scale_ena || !pa_cl_vte_cntl.vport_y_scale_ena) {
+-      // Pre-transformed screen-space EDRAM clears (e.g. D3DDevice::Clear) have
+-      // viewport scaling disabled and full-surface scissor.
++      // Pre-transformed screen-space EDRAM clears (e.g. D3DDevice::Clear) and
++      // unscaled post-FX scratch passes have viewport scaling disabled.
+       if (pa_cl_vte_cntl.vport_x_scale_ena || pa_cl_vte_cntl.vport_y_scale_ena ||
+-          !covers_full_rt) {
++          (!covers_full_rt && !covers_scratch_color_rt)) {
+         return false;
+       }
+     } else {
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+index 0fe1780..a2405ff 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -21,11 +21,23 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ #include <rex/string/buffer.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_ps_allow_fma, false, "GPU/Vulkan",
++                    "Omit NoContraction in non-depth pixel shaders to allow FMA fusion");
++REXCVAR_DEFINE_BOOL(vulkan_ps_skip_zero_mul, false, "GPU/Vulkan",
++                    "Skip SM3 0*NaN/Inf=0 guard in non-depth pixel shaders");
++REXCVAR_DEFINE_BOOL(vulkan_ps_relaxed_precision, false, "GPU/Vulkan",
++                    "Decorate non-depth pixel shader ALU ops with RelaxedPrecision (FP16)");
++REXCVAR_DEFINE_BOOL(vulkan_vs_fast_math, true, "GPU/Vulkan",
++                    "Allow FMA and skip SM3 0*NaN/Inf=0 guard in vertex shaders");
++REXCVAR_DEFINE_BOOL(vulkan_vs_batch_vfetch, true, "GPU/Vulkan",
++                    "Batch multi-word vfetch shared-memory bank switches in shaders");
++
+ namespace rex::graphics {
+ 
+ SpirvShaderTranslator::Features::Features(bool all)
+@@ -172,6 +184,11 @@ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+ }
+ 
+ void SpirvShaderTranslator::StartTranslation() {
++  ps_allow_fma_ = REXCVAR_GET(vulkan_ps_allow_fma);
++  ps_skip_zero_mul_ = REXCVAR_GET(vulkan_ps_skip_zero_mul);
++  ps_relaxed_precision_ = REXCVAR_GET(vulkan_ps_relaxed_precision);
++  vs_fast_math_ = REXCVAR_GET(vulkan_vs_fast_math);
++  vs_batch_vfetch_ = REXCVAR_GET(vulkan_vs_batch_vfetch);
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
+@@ -1219,7 +1236,9 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
+     builder_->addCapability(spv::CapabilityDenormFlushToZero);
+     builder_->addExecutionMode(function_main_, spv::ExecutionModeDenormFlushToZero, 32);
+   }
+-  if (features_.signed_zero_inf_nan_preserve_float32) {
++  if (features_.signed_zero_inf_nan_preserve_float32 &&
++      (!AllowPixelShaderFma() ||
++       (is_pixel_shader() && GetPsParamGenInterpolator() != UINT32_MAX))) {
+     // Signed zero used to get VFACE from ps_param_gen, also special behavior
+     // for infinity in certain instructions (such as logarithm, reciprocal,
+     // muls_prev2).
+@@ -3545,7 +3564,7 @@ spv::Id SpirvShaderTranslator::ApplyOperandModifiers(spv::Id operand_value,
+   }
+   if (original_operand.is_negated != invert_negate) {
+     EnsureBuildPointAvailable();
+-    operand_value = builder_->createNoContractionUnaryOp(spv::OpFNegate, type, operand_value);
++    operand_value = CreateFloatUnaryOp(spv::OpFNegate, type, operand_value);
+   }
+   return operand_value;
+ }
+@@ -4117,6 +4136,125 @@ spv::Id SpirvShaderTranslator::LoadUint32FromSharedMemory(spv::Id address_dwords
+   return value_phi_result;
+ }
+ 
++spv::Id SpirvShaderTranslator::LoadUint32VectorFromSharedMemory(spv::Id base_address_dwords_int,
++                                                              const int32_t* word_offsets,
++                                                              uint32_t word_count) {
++  assert_true(word_count >= 1 && word_count <= 4);
++  auto make_word_address = [&](int32_t word_offset) -> spv::Id {
++    if (!word_offset) {
++      return base_address_dwords_int;
++    }
++    return builder_->createBinOp(spv::OpIAdd, type_int_, base_address_dwords_int,
++                                 builder_->makeIntConstant(int(word_offset)));
++  };
++
++  if (word_count == 1) {
++    return LoadUint32FromSharedMemory(make_word_address(word_offsets[0]));
++  }
++
++  spv::Id vec_type = type_uint_vectors_[word_count - 1];
++  uint32_t binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
++  if (!vs_batch_vfetch_ || !binding_count_log2) {
++    spv::Id loaded_words[4];
++    for (uint32_t i = 0; i < word_count; ++i) {
++      loaded_words[i] = LoadUint32FromSharedMemory(make_word_address(word_offsets[i]));
++    }
++    id_vector_temp_.clear();
++    id_vector_temp_.insert(id_vector_temp_.cend(), loaded_words, loaded_words + word_count);
++    return builder_->createCompositeConstruct(vec_type, id_vector_temp_);
++  }
++
++  int32_t min_offset = word_offsets[0];
++  int32_t max_offset = word_offsets[0];
++  for (uint32_t i = 1; i < word_count; ++i) {
++    min_offset = std::min(min_offset, word_offsets[i]);
++    max_offset = std::max(max_offset, word_offsets[i]);
++  }
++  uint32_t span = uint32_t(max_offset - min_offset);
++
++  spv::Id first_address = make_word_address(min_offset);
++  uint32_t binding_address_bits = (29 - 2) - binding_count_log2;
++  uint32_t binding_mask = (uint32_t(1) << binding_address_bits) - 1;
++  spv::Id binding_index = builder_->createBinOp(
++      spv::OpShiftRightLogical, type_uint_,
++      builder_->createUnaryOp(spv::OpBitcast, type_uint_, first_address),
++      builder_->makeUintConstant(binding_address_bits));
++  spv::Id binding_address = builder_->createBinOp(
++      spv::OpBitwiseAnd, type_int_, first_address, builder_->makeIntConstant(int(binding_mask)));
++
++  // Fast path: all words of the element reside in the same shared-memory SSBO binding.
++  spv::Id no_bank_cross = builder_->createBinOp(
++      spv::OpULessThanEqual, type_bool_,
++      builder_->createUnaryOp(spv::OpBitcast, type_uint_, binding_address),
++      builder_->makeUintConstant(binding_mask - span));
++  SpirvBuilder::IfBuilder if_same_bank(no_bank_cross, spv::SelectionControlDontFlattenMask,
++                                       *builder_);
++  spv::Id fast_vec;
++  {
++    spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
++                                          ? spv::StorageClassStorageBuffer
++                                          : spv::StorageClassUniform;
++    spv::Id word_binding_addresses[4];
++    for (uint32_t i = 0; i < word_count; ++i) {
++      int32_t delta = word_offsets[i] - min_offset;
++      word_binding_addresses[i] =
++          delta ? builder_->createBinOp(spv::OpIAdd, type_int_, binding_address,
++                                        builder_->makeIntConstant(int(delta)))
++                : binding_address;
++    }
++
++    id_vector_temp_.clear();
++    id_vector_temp_.insert(id_vector_temp_.cend(), word_count, const_uint_0_);
++    spv::Id vec_zero = builder_->makeCompositeConstant(vec_type, id_vector_temp_);
++
++    auto fast_phi_op =
++        std::make_unique<spv::Instruction>(builder_->getUniqueId(), vec_type, spv::OpPhi);
++    fast_phi_op->addIdOperand(vec_zero);
++    fast_phi_op->addIdOperand(builder_->getBuildPoint()->getId());
++
++    SpirvBuilder::SwitchBuilder binding_switch(binding_index, spv::SelectionControlDontFlattenMask,
++                                               *builder_);
++    uint32_t binding_count = uint32_t(1) << binding_count_log2;
++
++    for (uint32_t b = 0; b < binding_count; ++b) {
++      binding_switch.makeBeginCase(b);
++      spv::Id binding_const = builder_->makeIntConstant(int(b));
++      spv::Id case_words[4];
++      for (uint32_t i = 0; i < word_count; ++i) {
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(binding_const);
++        id_vector_temp_.push_back(const_int_0_);
++        id_vector_temp_.push_back(word_binding_addresses[i]);
++        case_words[i] = builder_->createLoad(
++            builder_->createAccessChain(storage_class, buffers_shared_memory_, id_vector_temp_),
++            spv::NoPrecision);
++      }
++      id_vector_temp_.clear();
++      id_vector_temp_.insert(id_vector_temp_.cend(), case_words, case_words + word_count);
++      spv::Id case_vec = builder_->createCompositeConstruct(vec_type, id_vector_temp_);
++      fast_phi_op->addIdOperand(case_vec);
++      fast_phi_op->addIdOperand(builder_->getBuildPoint()->getId());
++    }
++
++    binding_switch.makeEndSwitch();
++    fast_vec = fast_phi_op->getResultId();
++    builder_->getBuildPoint()->addInstruction(std::move(fast_phi_op));
++  }
++  if_same_bank.makeBeginElse();
++  spv::Id slow_vec;
++  {
++    spv::Id slow_words[4];
++    for (uint32_t i = 0; i < word_count; ++i) {
++      slow_words[i] = LoadUint32FromSharedMemory(make_word_address(word_offsets[i]));
++    }
++    id_vector_temp_.clear();
++    id_vector_temp_.insert(id_vector_temp_.cend(), slow_words, slow_words + word_count);
++    slow_vec = builder_->createCompositeConstruct(vec_type, id_vector_temp_);
++  }
++  if_same_bank.makeEndIf();
++  return if_same_bank.createMergePhi(fast_vec, slow_vec);
++}
++
+ void SpirvShaderTranslator::StoreUint32ToSharedMemory(spv::Id value, spv::Id address_dwords_int,
+                                                       spv::Id replace_mask) {
+   spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 706ac7e..8c56646 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -77,12 +77,12 @@ void SpirvShaderTranslator::ProcessAluInstruction(const ParsedAluInstruction& in
+   // Whether the instruction has changed the predicate, and it needs to be
+   // checked again later.
+   bool predicate_written_vector = false;
+-  spv::Id vector_result = ProcessVectorAluOperation(instr, memexport_eM_potentially_written_before,
+-                                                    predicate_written_vector);
++  spv::Id vector_result = DecoratePsRelaxed(ProcessVectorAluOperation(
++      instr, memexport_eM_potentially_written_before, predicate_written_vector));
+ 
+   bool predicate_written_scalar = false;
+-  spv::Id scalar_result = ProcessScalarAluOperation(instr, memexport_eM_potentially_written_before,
+-                                                    predicate_written_scalar);
++  spv::Id scalar_result = DecoratePsRelaxed(ProcessScalarAluOperation(
++      instr, memexport_eM_potentially_written_before, predicate_written_scalar));
+   if (scalar_result != spv::NoResult) {
+     EnsureBuildPointAvailable();
+     builder_->createStore(scalar_result, var_main_previous_scalar_);
+@@ -173,7 +173,7 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+ 
+   switch (instr.vector_opcode) {
+     case ucode::AluVectorOpcode::kAdd: {
+-      return builder_->createNoContractionBinOp(
++      return CreateFloatBinOp(
+           spv::OpFAdd, result_type,
+           GetOperandComponents(operand_storage[0], instr.vector_operands[0],
+                                used_result_components),
+@@ -187,11 +187,12 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+         multiplicands[i] = GetOperandComponents(operand_storage[i], instr.vector_operands[i],
+                                                 used_result_components);
+       }
+-      spv::Id result = builder_->createNoContractionBinOp(spv::OpFMul, result_type,
+-                                                          multiplicands[0], multiplicands[1]);
++      spv::Id result = CreateFloatBinOp(spv::OpFMul, result_type, multiplicands[0], multiplicands[1]);
+       uint32_t multiplicands_different =
+-          used_result_components &
+-          ~instr.vector_operands[0].GetIdenticalComponents(instr.vector_operands[1]);
++          SkipPixelShaderZeroMulGuard()
++              ? 0u
++              : (used_result_components &
++                 ~instr.vector_operands[0].GetIdenticalComponents(instr.vector_operands[1]));
+       if (multiplicands_different) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         spv::Id different_operands[2] = {multiplicands[0], multiplicands[1]};
+@@ -272,7 +273,7 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+       if (instr.vector_opcode == ucode::AluVectorOpcode::kMad) {
+         // Not replacing true `0 + term` with conditional selection of the term
+         // because +0 + -0 should result in +0, not -0.
+-        result = builder_->createNoContractionBinOp(
++        result = CreateFloatBinOp(
+             spv::OpFAdd, result_type, result,
+             GetOperandComponents(operand_storage[2], instr.vector_operands[2],
+                                  used_result_components));
+@@ -454,16 +455,18 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+         operands[i] =
+             GetOperandComponents(operand_storage[i], instr.vector_operands[i], component_mask);
+       }
+-      uint32_t different = component_mask & ~instr.vector_operands[0].GetIdenticalComponents(
+-                                                instr.vector_operands[1]);
++      uint32_t different = SkipPixelShaderZeroMulGuard()
++                               ? 0u
++                               : (component_mask & ~instr.vector_operands[0].GetIdenticalComponents(
++                                                       instr.vector_operands[1]));
+       spv::Id result = spv::NoResult;
+       for (uint32_t i = 0; i < component_count; ++i) {
+         spv::Id operand_components[2];
+         for (unsigned int j = 0; j < 2; ++j) {
+           operand_components[j] = builder_->createCompositeExtract(operands[j], type_float_, i);
+         }
+-        spv::Id product = builder_->createNoContractionBinOp(
+-            spv::OpFMul, type_float_, operand_components[0], operand_components[1]);
++        spv::Id product =
++            CreateFloatBinOp(spv::OpFMul, type_float_, operand_components[0], operand_components[1]);
+         if (different & (1 << i)) {
+           // Shader Model 3: +0 or denormal * anything = +-0.
+           product = ZeroIfAnyOperandIsZero(
+@@ -474,10 +477,10 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+           result = product;
+           continue;
+         }
+-        result = builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, result, product);
++        result = CreateFloatBinOp(spv::OpFAdd, type_float_, result, product);
+       }
+       if (instr.vector_opcode == ucode::AluVectorOpcode::kDp2Add) {
+-        result = builder_->createNoContractionBinOp(
++        result = CreateFloatBinOp(
+             spv::OpFAdd, type_float_, result,
+             GetOperandComponents(operand_storage[2], instr.vector_operands[2], 0b0001));
+       }
+@@ -875,12 +878,11 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+     case ucode::AluScalarOpcode::kSubs: {
+       spv::Id a, b;
+       GetOperandScalarXY(operand_storage[0], instr.scalar_operands[0], a, b);
+-      return builder_->createNoContractionBinOp(spv::Op(kOps[size_t(instr.scalar_opcode)]),
+-                                                type_float_, a, b);
++      return CreateFloatBinOp(spv::Op(kOps[size_t(instr.scalar_opcode)]), type_float_, a, b);
+     }
+     case ucode::AluScalarOpcode::kAddsPrev:
+     case ucode::AluScalarOpcode::kSubsPrev: {
+-      return builder_->createNoContractionBinOp(
++      return CreateFloatBinOp(
+           spv::Op(kOps[size_t(instr.scalar_opcode)]), type_float_,
+           GetOperandComponents(operand_storage[0], instr.scalar_operands[0], 0b0001),
+           builder_->createLoad(var_main_previous_scalar_, spv::NoPrecision));
+@@ -888,8 +890,8 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+     case ucode::AluScalarOpcode::kMuls: {
+       spv::Id a, b;
+       GetOperandScalarXY(operand_storage[0], instr.scalar_operands[0], a, b);
+-      spv::Id result = builder_->createNoContractionBinOp(spv::OpFMul, type_float_, a, b);
+-      if (a != b) {
++      spv::Id result = CreateFloatBinOp(spv::OpFMul, type_float_, a, b);
++      if (a != b && !SkipPixelShaderZeroMulGuard()) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         result = ZeroIfAnyOperandIsZero(result, GetAbsoluteOperand(a, instr.scalar_operands[0]),
+                                         GetAbsoluteOperand(b, instr.scalar_operands[0]));
+@@ -899,11 +901,15 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+     case ucode::AluScalarOpcode::kMulsPrev: {
+       spv::Id a = GetOperandComponents(operand_storage[0], instr.scalar_operands[0], 0b0001);
+       spv::Id ps = builder_->createLoad(var_main_previous_scalar_, spv::NoPrecision);
+-      spv::Id result = builder_->createNoContractionBinOp(spv::OpFMul, type_float_, a, ps);
+-      // Shader Model 3: +0 or denormal * anything = +-0.
+-      return ZeroIfAnyOperandIsZero(result, GetAbsoluteOperand(a, instr.scalar_operands[0]),
+-                                    builder_->createUnaryBuiltinCall(
+-                                        type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, ps));
++      spv::Id result = CreateFloatBinOp(spv::OpFMul, type_float_, a, ps);
++      if (!SkipPixelShaderZeroMulGuard()) {
++        // Shader Model 3: +0 or denormal * anything = +-0.
++        result = ZeroIfAnyOperandIsZero(
++            result, GetAbsoluteOperand(a, instr.scalar_operands[0]),
++            builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs,
++                                             ps));
++      }
++      return result;
+     }
+     case ucode::AluScalarOpcode::kMulsPrev2: {
+       // Check if need to select the src0.a * ps case.
+@@ -1167,9 +1173,9 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+           GetOperandComponents(operand_storage[0], instr.scalar_operands[0], 0b0001);
+       spv::Id operand_1 =
+           GetOperandComponents(operand_storage[1], instr.scalar_operands[1], 0b0001);
+-      spv::Id result =
+-          builder_->createNoContractionBinOp(spv::OpFMul, type_float_, operand_0, operand_1);
+-      if (!(instr.scalar_operands[0].GetIdenticalComponents(instr.scalar_operands[1]) & 0b0001)) {
++      spv::Id result = CreateFloatBinOp(spv::OpFMul, type_float_, operand_0, operand_1);
++      if (!SkipPixelShaderZeroMulGuard() &&
++          !(instr.scalar_operands[0].GetIdenticalComponents(instr.scalar_operands[1]) & 0b0001)) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         result =
+             ZeroIfAnyOperandIsZero(result, GetAbsoluteOperand(operand_0, instr.scalar_operands[0]),
+@@ -1181,7 +1187,7 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+     case ucode::AluScalarOpcode::kAddsc1:
+     case ucode::AluScalarOpcode::kSubsc0:
+     case ucode::AluScalarOpcode::kSubsc1: {
+-      return builder_->createNoContractionBinOp(
++      return CreateFloatBinOp(
+           spv::Op(kOps[size_t(instr.scalar_opcode)]), type_float_,
+           GetOperandComponents(operand_storage[0], instr.scalar_operands[0], 0b0001),
+           GetOperandComponents(operand_storage[1], instr.scalar_operands[1], 0b0001));
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 1f4c596..83b6618 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -111,39 +111,22 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+ 
+   // Load the needed words.
+   unsigned int word_composite_indices[4] = {};
+-  spv::Id word_composite_constituents[4];
++  int32_t word_offsets[4];
+   uint32_t word_count = 0;
+   uint32_t words_remaining = needed_words;
+   uint32_t word_index;
+   while (rex::bit_scan_forward(words_remaining, &word_index)) {
+     words_remaining &= ~(1 << word_index);
+-    spv::Id word_address = address;
+     // Add the word offset from the instruction (signed), plus the offset of the
+     // word within the element.
+-    int32_t word_offset = instr.attributes.offset + word_index;
+-    if (word_offset) {
+-      word_address = builder_->createBinOp(spv::OpIAdd, type_int_, word_address,
+-                                           builder_->makeIntConstant(int(word_offset)));
+-    }
+-    word_composite_indices[word_index] = word_count;
+-    // FIXME(Triang3l): Bound checking is not done here, but haven't encountered
+-    // any games relying on out-of-bounds access. On Adreno 200 on Android (LG
+-    // P705), however, words (not full elements) out of glBufferData bounds
+-    // contain 0.
+-    word_composite_constituents[word_count++] = LoadUint32FromSharedMemory(word_address);
+-  }
+-  spv::Id words;
+-  if (word_count > 1) {
+-    // Copying from the array to id_vector_temp_ now, not in the loop above,
+-    // because of the LoadUint32FromSharedMemory call (potentially using
+-    // id_vector_temp_ internally).
+-    id_vector_temp_.clear();
+-    id_vector_temp_.insert(id_vector_temp_.cend(), word_composite_constituents,
+-                           word_composite_constituents + word_count);
+-    words = builder_->createCompositeConstruct(type_uint_vectors_[word_count - 1], id_vector_temp_);
+-  } else {
+-    words = word_composite_constituents[0];
++    word_offsets[word_count] = instr.attributes.offset + int32_t(word_index);
++    word_composite_indices[word_index] = word_count++;
+   }
++  // FIXME(Triang3l): Bound checking is not done here, but haven't encountered
++  // any games relying on out-of-bounds access. On Adreno 200 on Android (LG
++  // P705), however, words (not full elements) out of glBufferData bounds
++  // contain 0.
++  spv::Id words = LoadUint32VectorFromSharedMemory(address, word_offsets, word_count);
+ 
+   // Endian swap the words, getting the endianness from bits 0:1 of the second
+   // fetch constant word.
+diff --git a/sdk/src/graphics/shared_memory.cpp b/sdk/src/graphics/shared_memory.cpp
+index 47dd814..af5b10e 100644
+--- a/sdk/src/graphics/shared_memory.cpp
++++ b/sdk/src/graphics/shared_memory.cpp
+@@ -34,6 +34,10 @@ void SharedMemory::InitializeCommon() {
+   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
+   system_page_flags_valid_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
++  cp_cached_valid_blocks_.assign(num_system_page_flags_, 0);
++  cp_cached_block_epoch_.assign(num_system_page_flags_, 0);
++  cp_current_epoch_ = 1;
++  cp_last_seqlock_ = 0;
+ 
+   memory_invalidation_callback_handle_ =
+       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
+@@ -86,23 +90,31 @@ void SharedMemory::ShutdownCommon() {
+   system_page_flags_valid_.shrink_to_fit();
+   system_page_flags_valid_and_gpu_written_.clear();
+   system_page_flags_valid_and_gpu_written_.shrink_to_fit();
++  cp_cached_valid_blocks_.clear();
++  cp_cached_valid_blocks_.shrink_to_fit();
++  cp_cached_block_epoch_.clear();
++  cp_cached_block_epoch_.shrink_to_fit();
+   num_system_page_flags_ = 0;
+ }
+ 
+ void SharedMemory::InvalidateAllPages() {
+   auto global_lock = global_critical_region_.Acquire();
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+ 
+   std::fill(system_page_flags_valid_.begin(), system_page_flags_valid_.end(), uint64_t(0));
+   std::fill(system_page_flags_valid_and_gpu_written_.begin(),
+             system_page_flags_valid_and_gpu_written_.end(), uint64_t(0));
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+ }
+ 
+ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
+   auto global_lock = global_critical_region_.Acquire();
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+ 
+   // Pages that are valid only because the CPU uploaded them lose their valid
+   // bit here, so the next frame re-reads them from guest memory.
+   system_page_flags_valid_ = system_page_flags_valid_and_gpu_written_;
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+ }
+ 
+ void SharedMemory::ClearCache() {
+@@ -342,6 +354,92 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+     return true;
+   }
+ 
++  const uint64_t seq_before = valid_pages_seqlock_.load(std::memory_order_acquire);
++  if (!(seq_before & 1) && !cp_cached_valid_blocks_.empty()) {
++    if (cp_last_seqlock_ != seq_before) {
++      cp_last_seqlock_ = seq_before;
++      if (++cp_current_epoch_ == 0) {
++        std::fill(cp_cached_block_epoch_.begin(), cp_cached_block_epoch_.end(), 0);
++        cp_current_epoch_ = 1;
++      }
++    }
++    bool all_cached = true;
++    for (size_t k = 0; k < count; ++k) {
++      uint32_t start = ranges[k].first;
++      uint32_t length = ranges[k].second;
++      if (!length) {
++        continue;
++      }
++      if (start > kBufferSize || (kBufferSize - start) < length) {
++        return false;
++      }
++      uint32_t page_first = start >> page_size_log2_;
++      uint32_t page_last = (start + length - 1) >> page_size_log2_;
++      uint32_t block_first = page_first >> 6;
++      uint32_t block_last = page_last >> 6;
++      for (uint32_t b = block_first; b <= block_last; ++b) {
++        if (cp_cached_block_epoch_[b] != cp_current_epoch_) {
++          all_cached = false;
++          break;
++        }
++        uint64_t needed = UINT64_MAX;
++        if (b == block_first) {
++          needed &= ~((uint64_t(1) << (page_first & 63)) - 1);
++        }
++        if (b == block_last && (page_last & 63) != 63) {
++          needed &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
++        }
++        if ((cp_cached_valid_blocks_[b] & needed) != needed) {
++          all_cached = false;
++          break;
++        }
++      }
++      if (!all_cached) {
++        break;
++      }
++    }
++    if (all_cached && valid_pages_seqlock_.load(std::memory_order_acquire) == seq_before) {
++      return true;
++    }
++  }
++
++  auto record_cached_ranges = [this](uint64_t locked_seq) {
++    if ((locked_seq & 1) || cp_cached_valid_blocks_.empty() ||
++        valid_pages_seqlock_.load(std::memory_order_acquire) != locked_seq) {
++      return;
++    }
++    if (cp_last_seqlock_ != locked_seq) {
++      cp_last_seqlock_ = locked_seq;
++      if (++cp_current_epoch_ == 0) {
++        std::fill(cp_cached_block_epoch_.begin(), cp_cached_block_epoch_.end(), 0);
++        cp_current_epoch_ = 1;
++      }
++    }
++    for (const std::pair<uint32_t, uint32_t>& r : merged_ranges_) {
++      if (!r.second) {
++        continue;
++      }
++      uint32_t p_first = r.first >> page_size_log2_;
++      uint32_t p_last = (r.first + r.second - 1) >> page_size_log2_;
++      uint32_t b_first = p_first >> 6;
++      uint32_t b_last = p_last >> 6;
++      for (uint32_t b = b_first; b <= b_last; ++b) {
++        if (cp_cached_block_epoch_[b] != cp_current_epoch_) {
++          cp_cached_block_epoch_[b] = cp_current_epoch_;
++          cp_cached_valid_blocks_[b] = 0;
++        }
++        uint64_t mask = UINT64_MAX;
++        if (b == b_first) {
++          mask &= ~((uint64_t(1) << (p_first & 63)) - 1);
++        }
++        if (b == b_last && (p_last & 63) != 63) {
++          mask &= (uint64_t(1) << ((p_last & 63) + 1)) - 1;
++        }
++        cp_cached_valid_blocks_[b] |= mask;
++      }
++    }
++  };
++
+   // Fast path for a single range (the common case for RequestRange).
+   if (count == 1) {
+     uint32_t start = ranges[0].first;
+@@ -356,8 +454,10 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+       return false;
+     }
+     upload_ranges_.clear();
++    uint64_t locked_seq = 0;
+     {
+       auto global_lock = global_critical_region_.Acquire();
++      locked_seq = valid_pages_seqlock_.load(std::memory_order_relaxed);
+       uint32_t page_first = start >> page_size_log2_;
+       uint32_t page_last = (start + length - 1) >> page_size_log2_;
+       uint32_t block_first = page_first >> 6;
+@@ -403,11 +503,13 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+     merged_ranges_.emplace_back(start, length);
+     if (upload_ranges_.empty()) {
+       OnRangesRequested(merged_ranges_);
++      record_cached_ranges(locked_seq);
+       return true;
+     }
+     bool ok = UploadRanges(upload_ranges_);
+     if (ok) {
+       OnRangesRequested(merged_ranges_);
++      record_cached_ranges(locked_seq);
+     }
+     return ok;
+   }
+@@ -473,8 +575,10 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+     }
+     upload_ranges_.emplace_back(page_start, page_count);
+   };
++  uint64_t locked_seq = 0;
+   {
+     auto global_lock = global_critical_region_.Acquire();
++    locked_seq = valid_pages_seqlock_.load(std::memory_order_relaxed);
+     for (const std::pair<uint32_t, uint32_t>& range : merged_ranges_) {
+       uint32_t page_first = range.first >> page_size_log2_;
+       uint32_t page_last = (range.first + range.second - 1) >> page_size_log2_;
+@@ -533,12 +637,14 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+ 
+   if (upload_ranges_.empty()) {
+     OnRangesRequested(merged_ranges_);
++    record_cached_ranges(locked_seq);
+     return true;
+   }
+ 
+   bool ok = UploadRanges(upload_ranges_);
+   if (ok) {
+     OnRangesRequested(merged_ranges_);
++    record_cached_ranges(locked_seq);
+   }
+   return ok;
+ }
+@@ -568,6 +674,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+   uint32_t block_last = page_last >> 6;
+ 
+   auto global_lock = global_critical_region_.Acquire();
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+ 
+   if (!exact_range) {
+     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
+@@ -603,6 +710,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+   }
+ 
++  valid_pages_seqlock_.fetch_add(1, std::memory_order_acq_rel);
+   FireWatches(page_first, page_last, false);
+ 
+   return std::make_pair(page_first << page_size_log2_, (page_last - page_first + 1)
+diff --git a/sdk/src/graphics/util/draw.cpp b/sdk/src/graphics/util/draw.cpp
+index 003ac39..b177f2e 100644
+--- a/sdk/src/graphics/util/draw.cpp
++++ b/sdk/src/graphics/util/draw.cpp
+@@ -327,6 +327,14 @@ void GetHostViewportInfo(const RegisterFile& regs, uint32_t draw_resolution_scal
+     offset_add_xy[0] += 0.5f;
+     offset_add_xy[1] += 0.5f;
+   }
++  if ((regs[XE_GPU_REG_RB_SURFACE_INFO] & (UINT32_C(1) << 14)) != 0 &&
++      pa_cl_clip_cntl.clip_disable && !pa_cl_vte_cntl.vport_x_scale_ena &&
++      !pa_cl_vte_cntl.vport_y_scale_ena) {
++    scale_xy[0] *= 2.0f;
++    scale_xy[1] *= 2.0f;
++    offset_add_xy[0] *= 2.0f;
++    offset_add_xy[1] *= 2.0f;
++  }
+ 
+   // The maximum value is at least the maximum host render target size anyway -
+   // and a guest pixel is always treated as a whole with resolution scaling.
+diff --git a/sdk/src/graphics/util/draw_extent_estimator.cpp b/sdk/src/graphics/util/draw_extent_estimator.cpp
+index 3027dc8..5bc3fa3 100644
+--- a/sdk/src/graphics/util/draw_extent_estimator.cpp
++++ b/sdk/src/graphics/util/draw_extent_estimator.cpp
+@@ -245,9 +245,15 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+   }
+   // Top-left rule - .5 exclusive without MSAA, 1. exclusive with MSAA.
+   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+-  return (uint32_t(std::max(int32_t(0), max_y_24p8)) +
+-          ((rb_surface_info.msaa_samples == xenos::MsaaSamples::k1X) ? 127 : 255)) >>
+-         8;
++  uint32_t estimated_y =
++      (uint32_t(std::max(int32_t(0), max_y_24p8)) +
++       ((rb_surface_info.msaa_samples == xenos::MsaaSamples::k1X) ? 127 : 255)) >>
++      8;
++  if ((regs[XE_GPU_REG_RB_SURFACE_INFO] & (UINT32_C(1) << 14)) != 0 &&
++      !pa_cl_vte_cntl.vport_y_scale_ena) {
++    estimated_y *= 2u;
++  }
++  return estimated_y;
+ }
+ 
+ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+diff --git a/sdk/src/graphics/vulkan/command_processor.cpp b/sdk/src/graphics/vulkan/command_processor.cpp
+index 6d3b5f0..8164820 100644
+--- a/sdk/src/graphics/vulkan/command_processor.cpp
++++ b/sdk/src/graphics/vulkan/command_processor.cpp
+@@ -2240,10 +2240,20 @@ void VulkanCommandProcessor::ShutdownContext() {
+ }
+ 
+ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
++  static constexpr uint32_t kSamplerRelevantFetchMasks[6] = {
++      0x0007FFFFu,  // dword 0: type, signs, clamp_x/y/z
++      0x0000003Fu,  // dword 1: format
++      0x00006003u,  // dword 2: block alignment bits of 2D width/height
++      0x0FF81FFEu,  // dword 3: swizzle, mag/min/mip/aniso filters
++      0x000003FCu,  // dword 4: mip_min_level, mip_max_level
++      0x00000603u,  // dword 5: border_color, dimension
++  };
++  const uint32_t old_value =
++      index < RegisterFile::kRegisterCount ? register_file_->values[index] : ~value;
+   CommandProcessor::WriteRegister(index, value);
+ 
+   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+-    if (frame_open_) {
++    if (frame_open_ && old_value != value) {
+       uint32_t float_constant_index = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+       if (float_constant_index >= 256) {
+         float_constant_index -= 256;
+@@ -2262,17 +2272,27 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+     }
+   } else if (index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+              index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    if (old_value != value) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
++    }
+   } else if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+              index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
+-    if (texture_cache_) {
+-      texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) /
+-                                                  6);
++    if (old_value != value) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
++      uint32_t fetch_dword = index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
++      uint32_t fetch_index = fetch_dword / 6;
++      uint32_t fetch_bit = UINT32_C(1) << fetch_index;
++      if ((old_value ^ value) & kSamplerRelevantFetchMasks[fetch_dword % 6]) {
++        ++fetch_constant_gen_[fetch_index];
++      }
++      last_rp_sampled_mark_mask_ &= ~fetch_bit;
++      if (texture_cache_) {
++        texture_cache_->TextureFetchConstantWritten(fetch_index);
++      }
++      InvalidateVertexBufferResidency(fetch_dword / 2);
+     }
+-    InvalidateVertexBufferResidency((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 2);
+   }
+ }
+ 
+@@ -2347,15 +2367,53 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
+ 
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+-    current_constant_buffers_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
++    static constexpr uint32_t kSamplerRelevantFetchMasks[6] = {
++        0x0007FFFFu,  // dword 0: type, signs, clamp_x/y/z
++        0x0000003Fu,  // dword 1: format
++        0x00006003u,  // dword 2: block alignment bits of 2D width/height
++        0x0FF81FFEu,  // dword 3: swizzle, mag/min/mip/aniso filters
++        0x000003FCu,  // dword 4: mip_min_level, mip_max_level
++        0x00000603u,  // dword 5: border_color, dimension
++    };
++    uint32_t* dest = register_file_->values + start_index;
+     uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+-    uint32_t last_fetch_dword = end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+-    if (texture_cache_) {
+-      texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
++    uint32_t dirty_tex_fetch_mask = 0;
++    uint32_t dirty_sampler_fetch_mask = 0;
++    bool any_changed = false;
++    for (uint32_t i = 0; i < num_registers; ++i) {
++      uint32_t old_val = dest[i];
++      uint32_t new_val = memory::load_and_swap<uint32_t>(base + i);
++      if (old_val != new_val) {
++        dest[i] = new_val;
++        any_changed = true;
++        uint32_t fetch_dword = first_fetch_dword + i;
++        uint32_t tex_idx = fetch_dword / 6;
++        dirty_tex_fetch_mask |= UINT32_C(1) << tex_idx;
++        if ((old_val ^ new_val) & kSamplerRelevantFetchMasks[fetch_dword % 6]) {
++          dirty_sampler_fetch_mask |= UINT32_C(1) << tex_idx;
++        }
++        InvalidateVertexBufferResidency(fetch_dword / 2);
++      }
++    }
++    if (any_changed) {
++      current_constant_buffers_up_to_date_ &=
++          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
++      last_rp_sampled_mark_mask_ &= ~dirty_tex_fetch_mask;
++      uint32_t samp_remaining = dirty_sampler_fetch_mask;
++      uint32_t samp_idx;
++      while (rex::bit_scan_forward(samp_remaining, &samp_idx)) {
++        samp_remaining &= ~(UINT32_C(1) << samp_idx);
++        ++fetch_constant_gen_[samp_idx];
++      }
++      if (texture_cache_) {
++        uint32_t tex_remaining = dirty_tex_fetch_mask;
++        uint32_t tex_idx;
++        while (rex::bit_scan_forward(tex_remaining, &tex_idx)) {
++          tex_remaining &= ~(UINT32_C(1) << tex_idx);
++          texture_cache_->TextureFetchConstantWritten(tex_idx);
++        }
++      }
+     }
+-    InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
+     return;
+   }
+ 
+@@ -4408,21 +4466,57 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     // TODO(Triang3l): Sampler caching and reuse for adjacent draws within one
+     // submission.
+     uint32_t samplers_overflowed_count = 0;
++    const uint64_t current_submission = GetCurrentSubmission();
++    CachedSamplerStageEntry* stage_cache_entries[2] = {nullptr, nullptr};
++    bool stage_sampler_cache_hit[2] = {false, false};
+     for (uint32_t j = 0; j < 2; ++j) {
+       std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>& shader_samplers =
+           j ? current_samplers_pixel_ : current_samplers_vertex_;
+-      if (!i) {
+-        shader_samplers.clear();
+-      }
+       const VulkanShader* shader = j ? pixel_shader : vertex_shader;
+       if (!shader) {
++        if (!i) {
++          shader_samplers.clear();
++          last_applied_sampler_entry_[j] = nullptr;
++        }
++        continue;
++      }
++      const size_t bucket =
++          (reinterpret_cast<uintptr_t>(shader) >> 6) & (kCachedSamplerStageBuckets - 1);
++      CachedSamplerStageEntry& entry = cached_sampler_entries_[j][bucket];
++      stage_cache_entries[j] = &entry;
++      bool hit = !i && entry.shader == shader && entry.submission == current_submission;
++      if (hit) {
++        for (const std::pair<uint32_t, uint32_t>& fg : entry.fetch_gens) {
++          if (fetch_constant_gen_[fg.first] != fg.second) {
++            hit = false;
++            break;
++          }
++        }
++      }
++      if (hit) {
++        stage_sampler_cache_hit[j] = true;
++        if (last_applied_sampler_entry_[j] != &entry) {
++          shader_samplers = entry.samplers;
++          last_applied_sampler_entry_[j] = &entry;
++        }
+         continue;
+       }
+-      const std::vector<VulkanShader::SamplerBinding>& shader_sampler_bindings =
+-          shader->GetSamplerBindingsAfterTranslation();
+       if (!i) {
++        last_applied_sampler_entry_[j] = nullptr;
++        shader_samplers.clear();
++        const std::vector<VulkanShader::SamplerBinding>& shader_sampler_bindings =
++            shader->GetSamplerBindingsAfterTranslation();
+         shader_samplers.reserve(shader_sampler_bindings.size());
++        entry.shader = nullptr;
++        entry.fetch_gens.clear();
++        uint32_t seen_fetch_mask = 0;
+         for (const VulkanShader::SamplerBinding& shader_sampler_binding : shader_sampler_bindings) {
++          const uint32_t fc = shader_sampler_binding.fetch_constant;
++          const uint32_t fc_bit = UINT32_C(1) << fc;
++          if (!(seen_fetch_mask & fc_bit)) {
++            seen_fetch_mask |= fc_bit;
++            entry.fetch_gens.emplace_back(fc, fetch_constant_gen_[fc]);
++          }
+           shader_samplers.emplace_back(texture_cache_->GetSamplerParameters(shader_sampler_binding),
+                                        VK_NULL_HANDLE);
+         }
+@@ -4452,6 +4546,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       }
+     }
+     if (!samplers_overflowed_count) {
++      const uint64_t final_submission = GetCurrentSubmission();
++      for (uint32_t j = 0; j < 2; ++j) {
++        const VulkanShader* shader = j ? pixel_shader : vertex_shader;
++        CachedSamplerStageEntry* entry = stage_cache_entries[j];
++        if (shader && entry && (!stage_sampler_cache_hit[j] || entry->submission != final_submission)) {
++          const auto& shader_samplers = j ? current_samplers_pixel_ : current_samplers_vertex_;
++          entry->shader = shader;
++          entry->submission = final_submission;
++          entry->samplers = shader_samplers;
++          last_applied_sampler_entry_[j] = entry;
++        }
++      }
+       prof_mark(1);
+       break;
+     }
+@@ -4486,7 +4592,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   prof_mark(2);
+ 
+   const bool is_single_rect_draw =
+-      prim_type == xenos::PrimitiveType::kRectangleList && index_count == 3;
++      (prim_type == xenos::PrimitiveType::kRectangleList && (index_count == 3 || index_count == 6)) ||
++      ((prim_type == xenos::PrimitiveType::kTriangleStrip ||
++        prim_type == xenos::PrimitiveType::kQuadList) &&
++       index_count == 4);
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+   // Set up the render targets - this may perform dispatches and draws.
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+@@ -4786,10 +4895,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // After all commands that may dispatch, copy or insert barriers, submit
+   // the barriers (may end the render pass), and (re)enter the render pass
+   // before drawing.
+-  SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+-      render_target_cache_->last_update_render_pass(),
+-      render_target_cache_->last_update_framebuffer());
+-  texture_cache_->MarkTexturesSampledInCurrentRenderPass(used_texture_mask);
++  const VulkanRenderTargetCache::Framebuffer* last_rt_framebuffer =
++      render_target_cache_->last_update_framebuffer();
++  if (!pending_barriers_.empty() || current_pending_barrier_.src_stage_mask ||
++      current_pending_barrier_.dst_stage_mask ||
++      !pending_barriers_buffer_memory_barriers_.empty() ||
++      !pending_barriers_image_memory_barriers_.empty() || !use_dynamic_rendering_ ||
++      !in_render_pass_ || current_framebuffer_ != last_rt_framebuffer ||
++      current_render_pass_ != VK_NULL_HANDLE) {
++    SubmitBarriersAndEnterRenderTargetCacheRenderPass(
++        render_target_cache_->last_update_render_pass(), last_rt_framebuffer);
++  }
++  if (last_rp_sampled_mark_seq_ != current_rp_seq_) {
++    last_rp_sampled_mark_seq_ = current_rp_seq_;
++    last_rp_sampled_mark_mask_ = 0;
++  }
++  if ((last_rp_sampled_mark_mask_ & used_texture_mask) != used_texture_mask) {
++    texture_cache_->MarkTexturesSampledInCurrentRenderPass(used_texture_mask);
++    last_rp_sampled_mark_mask_ |= used_texture_mask;
++  }
+ 
+   // Draw.
+ #if REX_PLATFORM_SWITCH
+@@ -5896,6 +6020,10 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     current_render_pass_ = VK_NULL_HANDLE;
+     current_framebuffer_ = nullptr;
+     in_render_pass_ = false;
++    last_applied_sampler_entry_[0] = nullptr;
++    last_applied_sampler_entry_[1] = nullptr;
++    last_rp_sampled_mark_seq_ = 0;
++    last_rp_sampled_mark_mask_ = 0;
+     current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
+     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
+     current_external_compute_pipeline_ = VK_NULL_HANDLE;
+diff --git a/sdk/src/graphics/vulkan/render_target_cache.cpp b/sdk/src/graphics/vulkan/render_target_cache.cpp
+index 9bf9230..71730bf 100644
+--- a/sdk/src/graphics/vulkan/render_target_cache.cpp
++++ b/sdk/src/graphics/vulkan/render_target_cache.cpp
+@@ -73,12 +73,17 @@ extern "C" bool RexSwitchPerfSkip(unsigned bit);
+ #endif
+ 
+ REXCVAR_DECLARE(int32_t, gpu_sonda_faixas);
++REXCVAR_DECLARE(bool, gpu_sin_msaa);
+ 
+ REXCVAR_DEFINE_BOOL(gpu_atalho_resolve, false, "GPU",
+                     "Resolve shortcut: a resolve read back only by one texture of the same format and size copies "
+                     "the render target straight into that texture (at the render scale), skipping the EDRAM dump, "
+                     "the copy to guest memory and the texture load at 1x (VulkanTextureCache::Atalho)")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(vulkan_hdr_b10g11r11, false, "GPU/Vulkan",
++                    "Use 32-bit B10G11R11_UFLOAT_PACK32 instead of 64-bit R16G16B16A16_SFLOAT "
++                    "for k_2_10_10_10_FLOAT render targets when supported")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_INT32(gpu_teste_sem_dump_apos_s, 0, "GPU",
+                      "Test only (wrong image): like gpu_teste_sem_copia_apos_s, for the dump of the render targets "
+                      "into the EDRAM buffer alone");
+@@ -301,6 +306,20 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+                                         kUsedColorFormatFeatures) == kUsedColorFormatFeatures;
+   bool color_rgba16_unorm_supported = (color_rgba16_unorm_properties.optimalTilingFeatures &
+                                        kUsedColorFormatFeatures) == kUsedColorFormatFeatures;
++  hdr_b10g11r11_supported_ = false;
++  if (path_ == Path::kHostRenderTargets && REXCVAR_GET(vulkan_hdr_b10g11r11)) {
++    VkFormatProperties color_b10g11r11_properties;
++    ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
++                                            &color_b10g11r11_properties);
++    constexpr VkFormatFeatureFlags kB10G11R11Features =
++        kUsedColorFormatFeatures | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
++        VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
++    hdr_b10g11r11_supported_ =
++        (color_b10g11r11_properties.optimalTilingFeatures & kB10G11R11Features) ==
++        kB10G11R11Features;
++    REXGPU_INFO("VulkanRenderTargetCache: B10G11R11_UFLOAT_PACK32 HDR target {}",
++                hdr_b10g11r11_supported_ ? "enabled" : "unsupported");
++  }
+   bool color_rg16_draw_format_supported = true;
+   if (!color_rg16_snorm_supported) {
+     if (color_rg16_sfloat_supported) {
+@@ -1660,6 +1679,16 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+   bool cleared = false;
+   bool clear_depth = resolve_info.IsClearingDepth();
+   bool clear_color = resolve_info.IsClearingColor();
++  if ((clear_depth || clear_color) && REXCVAR_GET(gpu_sin_msaa) &&
++      (resolve_info.color_edram_info.pitch_tiles == 16 ||
++       resolve_info.depth_edram_info.pitch_tiles == 16)) {
++    // In PGR4 single-tile 1280x720 mode, both 1280x720 resolves with clear
++    // (scene color resolve before full-screen depth+color reconstruction draw,
++    // and final frame resolve before swap) immediately overwrite or discard
++    // the cleared EDRAM range without ever reading the cleared values.
++    clear_depth = false;
++    clear_color = false;
++  }
+   if (clear_depth || clear_color) {
+     switch (GetPath()) {
+       case Path::kHostRenderTargets: {
+@@ -2099,7 +2128,8 @@ VkFormat VulkanRenderTargetCache::GetColorVulkanFormat(
+       return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+-      return VK_FORMAT_R16G16B16A16_SFLOAT;
++      return hdr_b10g11r11_supported_ ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
++                                      : VK_FORMAT_R16G16B16A16_SFLOAT;
+     case xenos::ColorRenderTargetFormat::k_16_16:
+       return color_rg16_draw_format_fallback_to_float_ ? VK_FORMAT_R16G16_SFLOAT
+                                                        : VK_FORMAT_R16G16_SNORM;
+diff --git a/sdk/src/graphics/vulkan/shared_memory.cpp b/sdk/src/graphics/vulkan/shared_memory.cpp
+index 5ca4e0a..8b4504f 100644
+--- a/sdk/src/graphics/vulkan/shared_memory.cpp
++++ b/sdk/src/graphics/vulkan/shared_memory.cpp
+@@ -213,6 +213,7 @@ void VulkanSharedMemory::EndSubmission() {
+ }
+ 
+ void VulkanSharedMemory::OnBeginRenderPass() {
++  InvalidateRequestRangeCache();
+   if (++rp_read_gen_ == 0) {
+     std::fill(page_rp_read_gen_.begin(), page_rp_read_gen_.end(), 0);
+     rp_read_gen_ = 1;
