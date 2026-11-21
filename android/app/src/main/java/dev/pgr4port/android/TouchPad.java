@@ -36,6 +36,11 @@ final class TouchPad extends FrameLayout {
         addButton("Start", "Start", START, Gravity.TOP | Gravity.RIGHT, 14, 14);
     }
 
+    void setOpacityPercent(int percent) {
+        int clamped = Math.max(15, Math.min(100, percent));
+        setAlpha(clamped / 100.0f);
+    }
+
     private void addButton(String text, String description, int bit, int gravity,
                            int horizontalMargin, int verticalMargin) {
         Button button = new Button(getContext());
